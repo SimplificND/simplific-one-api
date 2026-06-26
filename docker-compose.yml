@@ -30,10 +30,9 @@ services:
       REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-}
     depends_on:
       - backend
-    ports:
-      - "3000:80"
+    expose:
+      - "80"
     restart: unless-stopped
 
 volumes:
   one_api_storage:
-
