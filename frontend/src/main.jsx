@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import axios from 'axios';
 import {
@@ -143,6 +143,8 @@ function App() {
   const [flowActions, setFlowActions] = useState([]);
   const [send, setSend] = useState({ name: '', listId: '', templateName: '', language: 'pt_BR', responseFlowId: '', exclusionListIds: '', scheduledAt: '', sendNow: true });
   const [replyItems, setReplyItems] = useState([]);
+  const [metaHydrated, setMetaHydrated] = useState(false);
+  const metaHydratedRef = useRef(false);
 
   const notify = (msg) => {
     setToast(msg);
@@ -163,7 +165,11 @@ function App() {
       http.get('/inbox').then((r) => r.data).catch(() => []),
     ]);
     setHealth(h); setSettings(s); setDashboard(d); setContacts(c); setLists(l); setTags(tagRows); setTemplates(t); setFlows(f); setCampaigns(camp); setInbox(i);
-    setMeta((old) => ({ ...old, ...(s.meta || {}), accessToken: old.accessToken }));
+    if (!metaHydratedRef.current && s.meta) {
+      setMeta((old) => ({ ...old, ...s.meta, accessToken: old.accessToken }));
+      metaHydratedRef.current = true;
+      setMetaHydrated(true);
+    }
   };
 
   useEffect(() => {
@@ -188,7 +194,20 @@ function App() {
   const saveMeta = async () => {
     await http.post('/meta/settings', meta);
     notify('Conexão salva');
+    metaHydratedRef.current = false;
+    setMetaHydrated(false);
     load();
+  };
+
+  const updateMeta = (key, value) => {
+    metaHydratedRef.current = true;
+    setMetaHydrated(true);
+    setMeta((current) => ({ ...current, [key]: value }));
+  };
+
+  const copyText = async (value, label) => {
+    await navigator.clipboard.writeText(value);
+    notify(`${label} copiado`);
   };
 
   const syncTemplates = async () => {
@@ -301,15 +320,26 @@ function App() {
         {tab === 'connection' && <section className="panel stack">
           <h2>Conectar número oficial</h2>
           <div className="form-row">
-            <Field label="Nome da empresa"><input value={meta.businessName || ''} onChange={(e) => setMeta({ ...meta, businessName: e.target.value })} /></Field>
-            <Field label="App ID"><input value={meta.appId || ''} onChange={(e) => setMeta({ ...meta, appId: e.target.value })} /></Field>
-            <Field label="App Secret"><input value={meta.appSecret || ''} onChange={(e) => setMeta({ ...meta, appSecret: e.target.value })} /></Field>
-            <Field label="WABA ID"><input value={meta.wabaId || ''} onChange={(e) => setMeta({ ...meta, wabaId: e.target.value })} /></Field>
-            <Field label="Phone Number ID"><input value={meta.phoneNumberId || ''} onChange={(e) => setMeta({ ...meta, phoneNumberId: e.target.value })} /></Field>
-            <Field label="Access Token"><input value={meta.accessToken || ''} onChange={(e) => setMeta({ ...meta, accessToken: e.target.value })} placeholder={settings.meta?.accessTokenPreview || ''} /></Field>
+            <Field label="Nome da empresa"><input value={meta.businessName || ''} onChange={(e) => updateMeta('businessName', e.target.value)} /></Field>
+            <Field label="App ID"><input value={meta.appId || ''} onChange={(e) => updateMeta('appId', e.target.value)} /></Field>
+            <Field label="App Secret"><input value={meta.appSecret || ''} onChange={(e) => updateMeta('appSecret', e.target.value)} /></Field>
+            <Field label="WABA ID"><input value={meta.wabaId || ''} onChange={(e) => updateMeta('wabaId', e.target.value)} /></Field>
+            <Field label="Phone Number ID"><input value={meta.phoneNumberId || ''} onChange={(e) => updateMeta('phoneNumberId', e.target.value)} /></Field>
+            <Field label="Access Token"><input value={meta.accessToken || ''} onChange={(e) => updateMeta('accessToken', e.target.value)} placeholder={settings.meta?.accessTokenPreview || ''} /></Field>
           </div>
           <div className="inline-actions"><Button onClick={saveMeta}>Salvar conexão</Button><Button variant="secondary" onClick={syncTemplates}>Sincronizar modelos</Button></div>
-          <div className="notice">Webhook: {window.location.origin}/api/meta/webhook · Token: simplific-one-api-webhook</div>
+          <div className="copy-grid">
+            <div className="notice">
+              <span>Callback URL</span>
+              <code>{window.location.origin}/api/meta/webhook</code>
+              <Button variant="secondary" onClick={() => copyText(`${window.location.origin}/api/meta/webhook`, 'Webhook')}>Copiar URL</Button>
+            </div>
+            <div className="notice">
+              <span>Verify token</span>
+              <code>simplific-one-api-webhook</code>
+              <Button variant="secondary" onClick={() => copyText('simplific-one-api-webhook', 'Token')}>Copiar token</Button>
+            </div>
+          </div>
         </section>}
 
         {tab === 'contacts' && <section className="panel stack">

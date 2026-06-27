@@ -278,6 +278,30 @@ li {
   padding: 16px;
 }
 
+.copy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.notice {
+  display: grid;
+  gap: 8px;
+}
+
+.notice span {
+  color: #a1a1aa;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.notice code {
+  color: #84ff00;
+  overflow-wrap: anywhere;
+}
+
 .subpanel {
   display: grid;
   gap: 14px;
@@ -504,6 +528,7 @@ li {
   .grid,
   .panel,
   .panel.inbox-panel,
+  .copy-grid,
   .form-row,
   .composer-grid,
   .sequence-item,
