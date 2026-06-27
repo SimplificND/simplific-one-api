@@ -665,6 +665,17 @@ function App() {
         </section>}
 
         {tab === 'inbox' && <section className="panel inbox-panel">
+          <div>
+            <h2>Conversas</h2>
+            <div className="inbox-list">{inbox.map((c) => <button key={c.id} onClick={() => openConversation(c.id)} className={selectedConversation?.conversation?.id === c.id ? 'selected' : ''}><b>{c.name || c.phone}</b><span>{c.lastMessage?.text || c.lastMessage?.type || '-'}</span></button>)}</div>
+          </div>
+          <div className="conversation main-conversation">
+            {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <>
+              <div className="messages">{selectedConversation.messages.map((m) => <div key={m.id} className={`bubble ${m.direction}`}><span>{m.text || m.type}</span><small>{new Date(m.createdAt).toLocaleString('pt-BR')}</small></div>)}</div>
+              <SequenceEditor items={replyItems} setItems={setReplyItems} notify={notify} />
+              <Button onClick={reply} disabled={replyItems.length === 0}>Responder</Button>
+            </>}
+          </div>
           <aside className="lead-side">
             <h2>Lead</h2>
             {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <div className="lead-card vertical">
@@ -687,17 +698,6 @@ function App() {
               <Button onClick={saveInboxLead}>Salvar lead</Button>
             </div>}
           </aside>
-          <div className="conversation main-conversation">
-            {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <>
-              <div className="messages">{selectedConversation.messages.map((m) => <div key={m.id} className={`bubble ${m.direction}`}><span>{m.text || m.type}</span><small>{new Date(m.createdAt).toLocaleString('pt-BR')}</small></div>)}</div>
-              <SequenceEditor items={replyItems} setItems={setReplyItems} notify={notify} />
-              <Button onClick={reply} disabled={replyItems.length === 0}>Responder</Button>
-            </>}
-          </div>
-          <div>
-            <h2>Conversas</h2>
-            <div className="inbox-list">{inbox.map((c) => <button key={c.id} onClick={() => openConversation(c.id)} className={selectedConversation?.conversation?.id === c.id ? 'selected' : ''}><b>{c.name || c.phone}</b><span>{c.lastMessage?.text || c.lastMessage?.type || '-'}</span></button>)}</div>
-          </div>
         </section>}
       </section>
       {toast && <div className="toast">{toast}</div>}

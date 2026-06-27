@@ -567,9 +567,9 @@ li {
 
 .lead-side {
   border: 0;
-  border-right: 1px solid #27272a;
+  border-left: 1px solid #27272a;
   background: transparent;
-  padding: 0 16px 0 0;
+  padding: 0 0 0 16px;
 }
 
 .main-conversation {
