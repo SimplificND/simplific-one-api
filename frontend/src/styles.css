@@ -222,6 +222,12 @@ h2 {
   grid-template-columns: 1fr;
 }
 
+.panel.inbox-panel {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  min-height: 620px;
+}
+
 .panel p,
 .muted,
 li {
@@ -252,6 +258,39 @@ li {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
+}
+
+.inline-actions,
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.subpanel,
+.notice,
+.lead-card {
+  border: 1px solid #27272a;
+  border-radius: 10px;
+  background: rgba(9, 9, 11, 0.72);
+  padding: 16px;
+}
+
+.subpanel {
+  display: grid;
+  gap: 14px;
+}
+
+.subpanel h3 {
+  margin: 0;
+}
+
+.notice {
+  color: #a1a1aa;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
 }
 
 .composer-grid {
@@ -352,6 +391,93 @@ li {
   margin-top: 12px;
 }
 
+.inbox-list {
+  display: grid;
+  gap: 8px;
+  max-height: 560px;
+  overflow: auto;
+}
+
+.inbox-list button {
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  background: #09090b;
+  color: #f4f4f5;
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  text-align: left;
+}
+
+.inbox-list button.selected {
+  border-color: rgba(132, 255, 0, 0.65);
+  background: rgba(132, 255, 0, 0.08);
+}
+
+.inbox-list span {
+  color: #a1a1aa;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.lead-card {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 14px;
+}
+
+.lead-card b,
+.lead-card span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lead-card span {
+  color: #a1a1aa;
+}
+
+.messages {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.bubble {
+  width: min(74%, 620px);
+  border: 1px solid #27272a;
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 5px;
+}
+
+.bubble.in {
+  justify-self: start;
+  background: #111113;
+}
+
+.bubble.out {
+  justify-self: end;
+  background: rgba(132, 255, 0, 0.1);
+  border-color: rgba(132, 255, 0, 0.25);
+}
+
+.bubble small {
+  color: #71717a;
+}
+
 .toast {
   position: fixed;
   right: 20px;
@@ -377,10 +503,12 @@ li {
 
   .grid,
   .panel,
+  .panel.inbox-panel,
   .form-row,
   .composer-grid,
   .sequence-item,
-  .row {
+  .row,
+  .lead-card {
     grid-template-columns: 1fr;
   }
 }

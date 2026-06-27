@@ -40,9 +40,14 @@ simplific-one-api-webhook
 ## Primeira versão funcional
 
 - Dashboard operacional.
+- Tela de conexão com App ID, App Secret, WABA ID, Phone Number ID e Access Token.
 - Cadastro de contatos com tags e listas.
+- Importação de leads por CSV com criação de lista, tags padrão e campos personalizados.
+- Upload de mídia local com URL pública para uso em fluxos.
+- Sincronização de modelos/templates da Meta pelo WABA ID.
 - Inbox alimentada pelo webhook oficial.
-- Envio manual de sequência: texto, template, imagem, vídeo, áudio ou documento.
+- Tela de envios com nome, lista, template, fluxo de resposta, listas de exclusão, envio imediato e agendamento.
+- Construção de fluxos com mensagem, áudio, imagem, vídeo, arquivo, tags, listas e atraso inteligente.
 - Automação por mensagem recebida, botão clicado, texto exato, texto contém ou qualquer mensagem.
 - Sequência com delay por item.
 - Envio real pela Cloud API quando `META_ACCESS_TOKEN` e `META_PHONE_NUMBER_ID` estiverem configurados.
