@@ -121,6 +121,13 @@ class LeadIn(BaseModel):
     customFields: dict[str, Any] = {}
 
 
+class ContactUpdateIn(BaseModel):
+    name: Optional[str] = None
+    tags: list[str] = []
+    lists: list[str] = []
+    customFields: dict[str, Any] = {}
+
+
 class NamedIn(BaseModel):
     name: str
     color: Optional[str] = None
@@ -855,6 +862,44 @@ async def sync_phone_numbers() -> dict[str, Any]:
     return {"count": len(synced), "phoneNumbers": synced}
 
 
+@app.post("/api/phone-numbers/{phone_number_id}/refresh")
+async def refresh_phone_number(phone_number_id: str) -> dict[str, Any]:
+    cfg = meta_config()
+    if not cfg["accessToken"]:
+        raise HTTPException(400, "Configure Access Token para atualizar o número.")
+    url = f"https://graph.facebook.com/{META_GRAPH_VERSION}/{phone_number_id}"
+    params = {"fields": "id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,code_verification_status,name_status"}
+    async with httpx.AsyncClient(timeout=45) as client:
+        res = await client.get(url, params=params, headers={"Authorization": f"Bearer {cfg['accessToken']}"})
+    if res.status_code >= 400:
+        raise HTTPException(res.status_code, res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text)
+    row = res.json()
+    data = store.read()
+    existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == phone_number_id), None)
+    if not existing:
+        existing = {
+            "id": phone_number_id,
+            "phoneNumberId": phone_number_id,
+            "active": data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id,
+            "source": "meta",
+            "createdAt": now_iso(),
+        }
+        data["phoneNumbers"].append(existing)
+    existing.update({
+        "id": row.get("id") or phone_number_id,
+        "phoneNumberId": row.get("id") or phone_number_id,
+        "displayPhoneNumber": row.get("display_phone_number") or existing.get("displayPhoneNumber"),
+        "verifiedName": row.get("verified_name") or existing.get("verifiedName"),
+        "qualityRating": row.get("quality_rating") or "UNKNOWN",
+        "messagingLimitTier": row.get("messaging_limit_tier") or "UNKNOWN",
+        "codeVerificationStatus": row.get("code_verification_status"),
+        "nameStatus": row.get("name_status"),
+        "refreshedAt": now_iso(),
+    })
+    await store.write(data)
+    return existing
+
+
 @app.post("/api/phone-numbers/{phone_number_id}/activate")
 async def activate_phone_number(phone_number_id: str) -> dict[str, Any]:
     data = store.read()
@@ -961,6 +1006,21 @@ async def get_contact(contact_id: str) -> dict[str, Any]:
         raise HTTPException(404, "Contato não encontrado")
     messages = [m for m in data["messages"] if m.get("contactId") == contact_id]
     return {"contact": contact, "messages": messages[-50:]}
+
+
+@app.patch("/api/contacts/{contact_id}")
+async def update_contact(contact_id: str, body: ContactUpdateIn) -> dict[str, Any]:
+    data = store.read()
+    contact = next((c for c in data["contacts"] if c["id"] == contact_id), None)
+    if not contact:
+        raise HTTPException(404, "Contato não encontrado")
+    contact["name"] = body.name
+    contact["tags"] = sorted(set(body.tags or []))
+    contact["lists"] = sorted(set(body.lists or []))
+    contact["customFields"] = body.customFields or {}
+    contact["updatedAt"] = now_iso()
+    await store.write(data)
+    return contact
 
 
 @app.post("/api/contacts")

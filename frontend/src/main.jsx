@@ -137,6 +137,7 @@ function App() {
   const [selectedContact, setSelectedContact] = useState(null);
   const [selectedTemplate, setSelectedTemplate] = useState(null);
   const [audience, setAudience] = useState({ included: 0, excluded: 0, receivers: 0 });
+  const [leadDraft, setLeadDraft] = useState({ name: '', tags: [], lists: [], customFields: {} });
   const [toast, setToast] = useState('');
 
   const [meta, setMeta] = useState({ appId: '', appSecret: '', wabaId: '', phoneNumberId: '', accessToken: '', businessName: '' });
@@ -203,6 +204,20 @@ function App() {
     }).then((r) => setAudience(r.data)).catch(() => setAudience({ included: 0, excluded: 0, receivers: 0 }));
   }, [tab, send.listIds, send.exclusionListIds, send.templateName, send.language]);
 
+  useEffect(() => {
+    const contactRow = selectedConversation?.contact;
+    if (!contactRow) {
+      setLeadDraft({ name: '', tags: [], lists: [], customFields: {} });
+      return;
+    }
+    setLeadDraft({
+      name: contactRow.name || '',
+      tags: contactRow.tags || [],
+      lists: contactRow.lists || [],
+      customFields: contactRow.customFields || {},
+    });
+  }, [selectedConversation?.contact?.id, selectedConversation?.contact?.updatedAt]);
+
   const nav = useMemo(() => [
     ['overview', Database, 'Visão Geral'],
     ['connection', Gear, 'Conexão'],
@@ -260,6 +275,12 @@ function App() {
   const activatePhone = async (id) => {
     await http.post(`/phone-numbers/${id}/activate`);
     notify('Número ativo atualizado');
+    load();
+  };
+
+  const refreshPhone = async (id) => {
+    await http.post(`/phone-numbers/${id}/refresh`);
+    notify('Dados do número atualizados');
     load();
   };
 
@@ -370,6 +391,37 @@ function App() {
     setSelectedConversation(data);
   };
 
+  const toggleLeadDraft = (field, id) => {
+    setLeadDraft((current) => {
+      const values = new Set(current[field] || []);
+      if (values.has(id)) values.delete(id);
+      else values.add(id);
+      return { ...current, [field]: Array.from(values) };
+    });
+  };
+
+  const setLeadCustomField = (key, value) => {
+    setLeadDraft((current) => ({ ...current, customFields: { ...(current.customFields || {}), [key]: value } }));
+  };
+
+  const saveInboxLead = async () => {
+    let contactId = selectedConversation?.contact?.id;
+    if (!contactId) {
+      const { data } = await http.post('/contacts', {
+        phone: selectedConversation.conversation.phone,
+        name: leadDraft.name || null,
+        tags: [],
+        lists: [],
+        customFields: {},
+      });
+      contactId = data.id;
+    }
+    await http.patch(`/contacts/${contactId}`, leadDraft);
+    notify('Dados do lead salvos');
+    await openConversation(selectedConversation.conversation.id);
+    load();
+  };
+
   const windowLabel = (conversation) => {
     const raw = conversation?.conversation?.lastInboundAt;
     if (!raw) return 'sem janela';
@@ -465,6 +517,7 @@ function App() {
                   <span>Limite: {phone.messagingLimitTier || 'UNKNOWN'}</span>
                   <div className="row-actions">
                     <Button variant={phone.active ? 'primary' : 'secondary'} onClick={() => activatePhone(phone.phoneNumberId || phone.id)}>{phone.active ? 'Ativo' : 'Ativar'}</Button>
+                    <Button variant="secondary" onClick={() => refreshPhone(phone.phoneNumberId || phone.id)}>Atualizar</Button>
                     <Button variant="secondary" onClick={() => deletePhone(phone.phoneNumberId || phone.id)}>Remover</Button>
                   </div>
                 </div>
@@ -607,7 +660,25 @@ function App() {
         {tab === 'inbox' && <section className="panel inbox-panel">
           <aside className="lead-side">
             <h2>Lead</h2>
-            {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <div className="lead-card vertical"><b>{selectedConversation.contact?.name || selectedConversation.conversation.phone}</b><span>{selectedConversation.conversation.phone}</span><span>Janela: {windowLabel(selectedConversation)}</span><span>Tags: {(selectedConversation.contact?.tags || []).map(tagName).join(', ') || '-'}</span><span>Listas: {(selectedConversation.contact?.lists || []).map(listName).join(', ') || '-'}</span><span>Campos: {Object.entries(selectedConversation.contact?.customFields || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '-'}</span></div>}
+            {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <div className="lead-card vertical">
+              <b>{selectedConversation.contact?.name || selectedConversation.conversation.phone}</b>
+              <span>{selectedConversation.conversation.phone}</span>
+              <span>Janela: {windowLabel(selectedConversation)}</span>
+              <Field label="Nome"><input value={leadDraft.name} onChange={(e) => setLeadDraft({ ...leadDraft, name: e.target.value })} /></Field>
+              <div className="subpanel compact">
+                <h3>Listas</h3>
+                <div className="check-list">{lists.length === 0 ? <span>Nenhuma lista cadastrada.</span> : lists.map((list) => <label key={list.id}><input type="checkbox" checked={(leadDraft.lists || []).includes(list.id)} onChange={() => toggleLeadDraft('lists', list.id)} /> {list.name}</label>)}</div>
+              </div>
+              <div className="subpanel compact">
+                <h3>Tags</h3>
+                <div className="check-list">{tags.length === 0 ? <span>Nenhuma tag cadastrada.</span> : tags.map((tag) => <label key={tag.id}><input type="checkbox" checked={(leadDraft.tags || []).includes(tag.id)} onChange={() => toggleLeadDraft('tags', tag.id)} /> {tag.name}</label>)}</div>
+              </div>
+              {customFields.length > 0 && <div className="subpanel compact">
+                <h3>Campos</h3>
+                {customFields.map((field) => <Field key={field.key} label={field.label || field.key}><input value={(leadDraft.customFields || {})[field.key] || ''} onChange={(e) => setLeadCustomField(field.key, e.target.value)} /></Field>)}
+              </div>}
+              <Button onClick={saveInboxLead}>Salvar lead</Button>
+            </div>}
           </aside>
           <div className="conversation main-conversation">
             {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <>

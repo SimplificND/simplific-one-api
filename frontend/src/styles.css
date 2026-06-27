@@ -307,6 +307,15 @@ li {
   gap: 14px;
 }
 
+.subpanel.compact {
+  padding: 12px;
+  gap: 10px;
+}
+
+.subpanel.compact h3 {
+  font-size: 14px;
+}
+
 .subpanel h3 {
   margin: 0;
 }
