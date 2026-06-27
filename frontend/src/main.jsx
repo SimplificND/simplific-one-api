@@ -230,6 +230,13 @@ function App() {
 
   const listName = (id) => lists.find((x) => x.id === id)?.name || id;
   const tagName = (id) => tags.find((x) => x.id === id)?.name || id;
+  const qualityClass = (value) => {
+    const normalized = String(value || '').toUpperCase();
+    if (['GREEN', 'HIGH', 'GOOD'].includes(normalized)) return 'good';
+    if (['YELLOW', 'MEDIUM', 'WARN', 'WARNING'].includes(normalized)) return 'warn';
+    if (['RED', 'LOW', 'BAD', 'RESTRICTED', 'FLAGGED'].includes(normalized)) return 'danger';
+    return 'neutral';
+  };
   const selectedSendTemplate = templates.find((t) => t.name === send.templateName && (!send.language || t.language === send.language)) || templates.find((t) => t.name === send.templateName);
   const selectedTemplateButtons = selectedSendTemplate?.buttons || [];
   const selectedTemplateParams = selectedSendTemplate?.params || [];
@@ -513,7 +520,7 @@ function App() {
                 <div className="row" key={phone.phoneNumberId || phone.id}>
                   <b>{phone.displayPhoneNumber || phone.phoneNumberId || phone.id}</b>
                   <span>{phone.verifiedName || 'sem nome verificado'}</span>
-                  <span>Qualidade: {phone.qualityRating || 'UNKNOWN'}</span>
+                  <span className={`quality-badge ${qualityClass(phone.qualityRating)}`}>Qualidade: {phone.qualityRating || 'UNKNOWN'}</span>
                   <span>Limite: {phone.messagingLimitTier || 'UNKNOWN'}</span>
                   <div className="row-actions">
                     <Button variant={phone.active ? 'primary' : 'secondary'} onClick={() => activatePhone(phone.phoneNumberId || phone.id)}>{phone.active ? 'Ativo' : 'Ativar'}</Button>
