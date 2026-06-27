@@ -89,6 +89,8 @@ class JsonStore:
             "webhookEvents": [],
             "media": [],
             "flows": [],
+            "phoneNumbers": [],
+            "customFields": [],
             "settings": {},
         }
 
@@ -124,6 +126,20 @@ class NamedIn(BaseModel):
     color: Optional[str] = None
 
 
+class CustomFieldIn(BaseModel):
+    key: str
+    label: Optional[str] = None
+    type: str = "text"
+
+
+class PhoneNumberManualIn(BaseModel):
+    phoneNumberId: str
+    displayPhoneNumber: Optional[str] = None
+    verifiedName: Optional[str] = None
+    qualityRating: Optional[str] = None
+    messagingLimitTier: Optional[str] = None
+
+
 class TemplateIn(BaseModel):
     name: str
     language: str = "pt_BR"
@@ -138,6 +154,8 @@ class MessageItem(BaseModel):
     language: str = "pt_BR"
     mediaUrl: Optional[str] = None
     caption: Optional[str] = None
+    templateParams: dict[str, Any] = {}
+    phoneNumberId: Optional[str] = None
     delaySeconds: int = Field(default=0, ge=0, le=86400)
 
 
@@ -180,6 +198,9 @@ class TemplateCampaignIn(BaseModel):
     tagIds: list[str] = []
     exclusionListIds: list[str] = []
     responseFlowId: Optional[str] = None
+    buttonFlowMap: dict[str, str] = {}
+    parameterMap: dict[str, str] = {}
+    phoneNumberId: Optional[str] = None
     sendNow: bool = True
     scheduledAt: Optional[str] = None
 
@@ -195,8 +216,16 @@ class AutomationIn(BaseModel):
 
 
 def configured_meta() -> bool:
-    settings = store.read().get("settings", {}).get("meta", {})
-    return bool((settings.get("accessToken") or os.getenv("META_ACCESS_TOKEN")) and (settings.get("phoneNumberId") or os.getenv("META_PHONE_NUMBER_ID")))
+    data = store.read()
+    settings = data.get("settings", {}).get("meta", {})
+    has_token = settings.get("accessToken") or os.getenv("META_ACCESS_TOKEN")
+    has_phone = (
+        settings.get("phoneNumberId")
+        or os.getenv("META_PHONE_NUMBER_ID")
+        or next((p.get("phoneNumberId") or p.get("id") for p in data.get("phoneNumbers", []) if p.get("active")), "")
+        or next(((p.get("phoneNumberId") or p.get("id")) for p in data.get("phoneNumbers", [])), "")
+    )
+    return bool(has_token and has_phone)
 
 
 def meta_config() -> dict[str, str]:
@@ -209,6 +238,57 @@ def meta_config() -> dict[str, str]:
         "appSecret": settings.get("appSecret") or os.getenv("META_APP_SECRET") or "",
         "businessName": settings.get("businessName") or "",
     }
+
+
+def active_phone_number_id(data: Optional[dict[str, Any]] = None, override: Optional[str] = None) -> str:
+    if override:
+        return override
+    cfg = meta_config()
+    if cfg["phoneNumberId"]:
+        return cfg["phoneNumberId"]
+    data = data or store.read()
+    active = next((p for p in data.get("phoneNumbers", []) if p.get("active")), None)
+    if active:
+        return active.get("phoneNumberId") or active.get("id") or ""
+    first = next(iter(data.get("phoneNumbers", [])), None)
+    return (first or {}).get("phoneNumberId") or (first or {}).get("id") or ""
+
+
+def extract_template_buttons(template: dict[str, Any]) -> list[dict[str, Any]]:
+    buttons = []
+    for component in template.get("components") or []:
+        if component.get("type") == "BUTTONS":
+            for index, button in enumerate(component.get("buttons") or []):
+                buttons.append({
+                    "index": index,
+                    "type": button.get("type"),
+                    "text": button.get("text") or button.get("phone_number") or button.get("url") or f"Botão {index + 1}",
+                })
+    return buttons
+
+
+def extract_template_params(template: dict[str, Any]) -> list[str]:
+    params = []
+    for component in template.get("components") or []:
+        text = component.get("text") or ""
+        for match in re.findall(r"\{\{\s*(\d+)\s*\}\}", text):
+            if match not in params:
+                params.append(match)
+    return params
+
+
+def template_by_name(data: dict[str, Any], name: str, language: str) -> Optional[dict[str, Any]]:
+    return next((t for t in data["templates"] if t.get("name") == name and (t.get("language") == language or not language)), None)
+
+
+def template_body_components(template_params: dict[str, Any]) -> list[dict[str, Any]]:
+    if not template_params:
+        return []
+    ordered = [template_params[k] for k in sorted(template_params, key=lambda x: int(x) if str(x).isdigit() else str(x))]
+    return [{
+        "type": "body",
+        "parameters": [{"type": "text", "text": str(value or "")} for value in ordered],
+    }]
 
 
 def upsert_contact(data: dict[str, Any], phone: str, name: Optional[str] = None) -> dict[str, Any]:
@@ -266,7 +346,9 @@ async def meta_send(item: MessageItem, phone: str) -> dict[str, Any]:
         return {"mock": True, "reason": "META_ACCESS_TOKEN or META_PHONE_NUMBER_ID not configured"}
 
     cfg = meta_config()
-    phone_number_id = cfg["phoneNumberId"]
+    phone_number_id = item.phoneNumberId or active_phone_number_id()
+    if not phone_number_id:
+        raise HTTPException(400, "Nenhum Phone Number ID conectado")
     token = cfg["accessToken"]
     url = f"https://graph.facebook.com/{META_GRAPH_VERSION}/{phone_number_id}/messages"
     payload: dict[str, Any] = {
@@ -275,9 +357,13 @@ async def meta_send(item: MessageItem, phone: str) -> dict[str, Any]:
         "to": normalize_phone(phone),
     }
     if item.type == "template":
+        template_payload = {"name": item.templateName, "language": {"code": item.language}}
+        components = template_body_components(item.templateParams)
+        if components:
+            template_payload["components"] = components
         payload.update({
             "type": "template",
-            "template": {"name": item.templateName, "language": {"code": item.language}},
+            "template": template_payload,
         })
     elif item.type == "text":
         payload.update({"type": "text", "text": {"preview_url": True, "body": item.text or ""}})
@@ -332,6 +418,16 @@ async def send_sequence(phone: str, items: list[MessageItem], source: str = "man
     convo["lastMessageAt"] = now_iso()
     await store.write(data)
     return results
+
+
+async def set_pending_response_flow(phone: str, response_flow_id: Optional[str] = None, button_flow_map: Optional[dict[str, str]] = None) -> None:
+    data = store.read()
+    contact = upsert_contact(data, phone)
+    if button_flow_map:
+        contact["pendingResponseFlows"] = button_flow_map
+    elif response_flow_id:
+        contact["pendingResponseFlowId"] = response_flow_id
+    await store.write(data)
 
 
 def ensure_named_list(data: dict[str, Any], name: str) -> str:
@@ -410,17 +506,30 @@ async def execute_campaign(campaign_id: str) -> None:
     body = TemplateCampaignIn(**campaign["config"])
     contacts = contacts_for_campaign(data, body)
     for contact in contacts:
+        custom_fields = contact.get("customFields") or {}
+        template_params = {
+            key: custom_fields.get(field_key, contact.get(field_key, ""))
+            for key, field_key in (body.parameterMap or {}).items()
+        }
         result = await send_sequence(
             contact["phone"],
-            [MessageItem(type="template", templateName=body.templateName, language=body.language)],
+            [MessageItem(
+                type="template",
+                templateName=body.templateName,
+                language=body.language,
+                templateParams=template_params,
+                phoneNumberId=body.phoneNumberId,
+            )],
             source=f"campaign:{campaign_id}",
         )
         if any(msg["status"] == "sent" for msg in result):
             sent += 1
         else:
             failed += 1
-        if body.responseFlowId:
-            contact["pendingResponseFlowId"] = body.responseFlowId
+        if body.buttonFlowMap:
+            await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap)
+        elif body.responseFlowId:
+            await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId)
 
     data = store.read()
     campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
@@ -466,9 +575,13 @@ def automation_matches(automation: dict[str, Any], inbound: dict[str, Any]) -> b
 async def run_matching_automations(phone: str, inbound: dict[str, Any]) -> None:
     data = store.read()
     contact = upsert_contact(data, phone, inbound.get("name"))
-    pending_flow = contact.get("pendingResponseFlowId")
+    button_text = str(inbound.get("buttonText") or inbound.get("text") or "").strip()
+    pending_map = contact.get("pendingResponseFlows") or {}
+    pending_flow = pending_map.get(button_text) or contact.get("pendingResponseFlowId")
     if pending_flow:
         contact["pendingResponseFlowId"] = None
+        if pending_map:
+            contact["pendingResponseFlows"] = {}
         await store.write(data)
         await run_flow_for_contact(contact["phone"], pending_flow, source=f"button-flow:{pending_flow}")
         data = store.read()
@@ -661,9 +774,133 @@ async def sync_meta_templates() -> dict[str, Any]:
     return {"count": len(synced), "templates": synced}
 
 
+@app.get("/api/phone-numbers")
+async def list_phone_numbers() -> list[dict[str, Any]]:
+    data = store.read()
+    numbers = data["phoneNumbers"]
+    cfg = meta_config()
+    if cfg["phoneNumberId"] and not any((p.get("phoneNumberId") or p.get("id")) == cfg["phoneNumberId"] for p in numbers):
+        numbers.append({
+            "id": cfg["phoneNumberId"],
+            "phoneNumberId": cfg["phoneNumberId"],
+            "displayPhoneNumber": "",
+            "verifiedName": cfg.get("businessName") or "",
+            "qualityRating": "UNKNOWN",
+            "messagingLimitTier": "UNKNOWN",
+            "active": True,
+            "source": "settings",
+        })
+    return numbers
+
+
+@app.post("/api/phone-numbers")
+async def add_phone_number(body: PhoneNumberManualIn) -> dict[str, Any]:
+    data = store.read()
+    doc = {
+        "id": body.phoneNumberId,
+        "phoneNumberId": body.phoneNumberId,
+        "displayPhoneNumber": body.displayPhoneNumber,
+        "verifiedName": body.verifiedName,
+        "qualityRating": body.qualityRating or "UNKNOWN",
+        "messagingLimitTier": body.messagingLimitTier or "UNKNOWN",
+        "active": not data["phoneNumbers"],
+        "source": "manual",
+        "createdAt": now_iso(),
+    }
+    existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == body.phoneNumberId), None)
+    if existing:
+        existing.update(doc)
+    else:
+        data["phoneNumbers"].append(doc)
+    await store.write(data)
+    return doc
+
+
+@app.post("/api/phone-numbers/sync")
+async def sync_phone_numbers() -> dict[str, Any]:
+    cfg = meta_config()
+    if not cfg["accessToken"] or not cfg["wabaId"]:
+        raise HTTPException(400, "Configure WABA ID e Access Token para sincronizar números.")
+    url = f"https://graph.facebook.com/{META_GRAPH_VERSION}/{cfg['wabaId']}/phone_numbers"
+    params = {"fields": "id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,code_verification_status,name_status"}
+    async with httpx.AsyncClient(timeout=45) as client:
+        res = await client.get(url, params=params, headers={"Authorization": f"Bearer {cfg['accessToken']}"})
+    if res.status_code >= 400:
+        raise HTTPException(res.status_code, res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text)
+    payload = res.json()
+    data = store.read()
+    synced = []
+    active_id = active_phone_number_id(data)
+    for row in payload.get("data", []) or []:
+        doc = {
+            "id": row.get("id"),
+            "phoneNumberId": row.get("id"),
+            "displayPhoneNumber": row.get("display_phone_number"),
+            "verifiedName": row.get("verified_name"),
+            "qualityRating": row.get("quality_rating") or "UNKNOWN",
+            "messagingLimitTier": row.get("messaging_limit_tier") or "UNKNOWN",
+            "codeVerificationStatus": row.get("code_verification_status"),
+            "nameStatus": row.get("name_status"),
+            "active": row.get("id") == active_id,
+            "source": "meta",
+            "syncedAt": now_iso(),
+        }
+        existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == row.get("id")), None)
+        if existing:
+            existing.update(doc)
+        else:
+            data["phoneNumbers"].append(doc)
+        synced.append(doc)
+    await store.write(data)
+    return {"count": len(synced), "phoneNumbers": synced}
+
+
+@app.post("/api/phone-numbers/{phone_number_id}/activate")
+async def activate_phone_number(phone_number_id: str) -> dict[str, Any]:
+    data = store.read()
+    found = False
+    for phone in data["phoneNumbers"]:
+        is_active = (phone.get("phoneNumberId") or phone.get("id")) == phone_number_id
+        phone["active"] = is_active
+        found = found or is_active
+    if not found:
+        raise HTTPException(404, "Número não encontrado")
+    data.setdefault("settings", {}).setdefault("meta", {})["phoneNumberId"] = phone_number_id
+    await store.write(data)
+    return {"active": phone_number_id}
+
+
+@app.delete("/api/phone-numbers/{phone_number_id}")
+async def delete_phone_number(phone_number_id: str) -> dict[str, Any]:
+    data = store.read()
+    before = len(data["phoneNumbers"])
+    data["phoneNumbers"] = [p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) != phone_number_id]
+    if data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id:
+        data["settings"]["meta"].pop("phoneNumberId", None)
+    await store.write(data)
+    return {"deleted": before - len(data["phoneNumbers"])}
+
+
 @app.get("/api/templates")
 async def list_templates() -> list[dict[str, Any]]:
-    return store.read()["templates"]
+    data = store.read()
+    rows = []
+    for template in data["templates"]:
+        rows.append({
+            **template,
+            "buttons": extract_template_buttons(template),
+            "params": extract_template_params(template),
+        })
+    return rows
+
+
+@app.get("/api/templates/{template_id}")
+async def get_template(template_id: str) -> dict[str, Any]:
+    data = store.read()
+    template = next((t for t in data["templates"] if t["id"] == template_id), None)
+    if not template:
+        raise HTTPException(404, "Modelo não encontrado")
+    return {**template, "buttons": extract_template_buttons(template), "params": extract_template_params(template)}
 
 
 @app.post("/api/templates")
@@ -714,6 +951,16 @@ async def media_raw(media_id: str):
 @app.get("/api/contacts")
 async def list_contacts() -> list[dict[str, Any]]:
     return sorted(store.read()["contacts"], key=lambda c: c.get("createdAt", ""), reverse=True)
+
+
+@app.get("/api/contacts/{contact_id}")
+async def get_contact(contact_id: str) -> dict[str, Any]:
+    data = store.read()
+    contact = next((c for c in data["contacts"] if c["id"] == contact_id), None)
+    if not contact:
+        raise HTTPException(404, "Contato não encontrado")
+    messages = [m for m in data["messages"] if m.get("contactId") == contact_id]
+    return {"contact": contact, "messages": messages[-50:]}
 
 
 @app.post("/api/contacts")
@@ -786,6 +1033,27 @@ async def create_list(body: NamedIn) -> dict[str, Any]:
     data = store.read()
     doc = {"id": new_id("list"), "name": body.name, "createdAt": now_iso()}
     data["lists"].append(doc)
+    await store.write(data)
+    return doc
+
+
+@app.get("/api/custom-fields")
+async def list_custom_fields() -> list[dict[str, Any]]:
+    return store.read()["customFields"]
+
+
+@app.post("/api/custom-fields")
+async def create_custom_field(body: CustomFieldIn) -> dict[str, Any]:
+    data = store.read()
+    key = re.sub(r"[^a-zA-Z0-9_]+", "_", body.key.strip()).strip("_")
+    if not key:
+        raise HTTPException(400, "Informe uma chave válida")
+    doc = {"id": key, "key": key, "label": body.label or key, "type": body.type, "createdAt": now_iso()}
+    existing = next((f for f in data["customFields"] if f["key"] == key), None)
+    if existing:
+        existing.update(doc)
+    else:
+        data["customFields"].append(doc)
     await store.write(data)
     return doc
 
@@ -927,6 +1195,19 @@ async def delete_automation(automation_id: str) -> dict[str, Any]:
 @app.get("/api/campaigns")
 async def list_campaigns() -> list[dict[str, Any]]:
     return sorted(store.read()["campaigns"], key=lambda c: c.get("createdAt", ""), reverse=True)
+
+
+@app.post("/api/campaigns/estimate")
+async def estimate_campaign(body: TemplateCampaignIn) -> dict[str, Any]:
+    data = store.read()
+    included = contacts_for_campaign(data, TemplateCampaignIn(**{**body.model_dump(), "exclusionListIds": []}))
+    final = contacts_for_campaign(data, body)
+    excluded_ids = {c["id"] for c in included} - {c["id"] for c in final}
+    return {
+        "included": len(included),
+        "excluded": len(excluded_ids),
+        "receivers": len(final),
+    }
 
 
 @app.post("/api/campaigns")

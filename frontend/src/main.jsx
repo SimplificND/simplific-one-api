@@ -127,21 +127,29 @@ function App() {
   const [contacts, setContacts] = useState([]);
   const [lists, setLists] = useState([]);
   const [tags, setTags] = useState([]);
+  const [customFields, setCustomFields] = useState([]);
+  const [phoneNumbers, setPhoneNumbers] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [flows, setFlows] = useState([]);
   const [campaigns, setCampaigns] = useState([]);
   const [inbox, setInbox] = useState([]);
   const [selectedConversation, setSelectedConversation] = useState(null);
+  const [selectedContact, setSelectedContact] = useState(null);
+  const [selectedTemplate, setSelectedTemplate] = useState(null);
+  const [audience, setAudience] = useState({ included: 0, excluded: 0, receivers: 0 });
   const [toast, setToast] = useState('');
 
   const [meta, setMeta] = useState({ appId: '', appSecret: '', wabaId: '', phoneNumberId: '', accessToken: '', businessName: '' });
   const [contact, setContact] = useState({ name: '', phone: '', tags: '', lists: '', customFields: '' });
+  const [newPhone, setNewPhone] = useState({ phoneNumberId: '', displayPhoneNumber: '', verifiedName: '' });
+  const [newListName, setNewListName] = useState('');
+  const [newField, setNewField] = useState({ key: '', label: '', type: 'text' });
   const [csvFile, setCsvFile] = useState(null);
   const [csvListName, setCsvListName] = useState('');
   const [csvTags, setCsvTags] = useState('');
   const [flow, setFlow] = useState({ name: '', triggerValue: '' });
   const [flowActions, setFlowActions] = useState([]);
-  const [send, setSend] = useState({ name: '', listId: '', templateName: '', language: 'pt_BR', responseFlowId: '', exclusionListIds: '', scheduledAt: '', sendNow: true });
+  const [send, setSend] = useState({ name: '', listIds: [], templateName: '', language: 'pt_BR', responseFlowId: '', exclusionListIds: [], scheduledAt: '', sendNow: true, buttonFlowMap: {}, parameterMap: {}, phoneNumberId: '' });
   const [replyItems, setReplyItems] = useState([]);
   const [metaHydrated, setMetaHydrated] = useState(false);
   const metaHydratedRef = useRef(false);
@@ -152,19 +160,21 @@ function App() {
   };
 
   const load = async () => {
-    const [h, s, d, c, l, tagRows, t, f, camp, i] = await Promise.all([
+    const [h, s, d, c, l, tagRows, fieldRows, p, t, f, camp, i] = await Promise.all([
       http.get('/health').then((r) => r.data).catch(() => ({ ok: false })),
       http.get('/settings').then((r) => r.data).catch(() => ({})),
       http.get('/dashboard').then((r) => r.data).catch(() => ({})),
       http.get('/contacts').then((r) => r.data).catch(() => []),
       http.get('/lists').then((r) => r.data).catch(() => []),
       http.get('/tags').then((r) => r.data).catch(() => []),
+      http.get('/custom-fields').then((r) => r.data).catch(() => []),
+      http.get('/phone-numbers').then((r) => r.data).catch(() => []),
       http.get('/templates').then((r) => r.data).catch(() => []),
       http.get('/flows').then((r) => r.data).catch(() => []),
       http.get('/campaigns').then((r) => r.data).catch(() => []),
       http.get('/inbox').then((r) => r.data).catch(() => []),
     ]);
-    setHealth(h); setSettings(s); setDashboard(d); setContacts(c); setLists(l); setTags(tagRows); setTemplates(t); setFlows(f); setCampaigns(camp); setInbox(i);
+    setHealth(h); setSettings(s); setDashboard(d); setContacts(c); setLists(l); setTags(tagRows); setCustomFields(fieldRows); setPhoneNumbers(p); setTemplates(t); setFlows(f); setCampaigns(camp); setInbox(i);
     if (!metaHydratedRef.current && s.meta) {
       setMeta((old) => ({ ...old, ...s.meta, accessToken: old.accessToken }));
       metaHydratedRef.current = true;
@@ -178,6 +188,21 @@ function App() {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (tab !== 'sends') return;
+    http.post('/campaigns/estimate', {
+      name: send.name || 'estimativa',
+      templateName: send.templateName || 'template',
+      language: send.language,
+      listIds: send.listIds,
+      exclusionListIds: send.exclusionListIds,
+      buttonFlowMap: send.buttonFlowMap,
+      parameterMap: send.parameterMap,
+      phoneNumberId: send.phoneNumberId || null,
+      sendNow: false,
+    }).then((r) => setAudience(r.data)).catch(() => setAudience({ included: 0, excluded: 0, receivers: 0 }));
+  }, [tab, send.listIds, send.exclusionListIds, send.templateName, send.language]);
+
   const nav = useMemo(() => [
     ['overview', Database, 'Visão Geral'],
     ['connection', Gear, 'Conexão'],
@@ -190,6 +215,9 @@ function App() {
 
   const listName = (id) => lists.find((x) => x.id === id)?.name || id;
   const tagName = (id) => tags.find((x) => x.id === id)?.name || id;
+  const selectedSendTemplate = templates.find((t) => t.name === send.templateName && (!send.language || t.language === send.language)) || templates.find((t) => t.name === send.templateName);
+  const selectedTemplateButtons = selectedSendTemplate?.buttons || [];
+  const selectedTemplateParams = selectedSendTemplate?.params || [];
 
   const saveMeta = async () => {
     await http.post('/meta/settings', meta);
@@ -214,6 +242,55 @@ function App() {
     const { data } = await http.post('/meta/sync-templates');
     notify(`${data.count} modelos sincronizados`);
     load();
+  };
+
+  const syncPhoneNumbers = async () => {
+    const { data } = await http.post('/phone-numbers/sync');
+    notify(`${data.count} números sincronizados`);
+    load();
+  };
+
+  const addPhoneNumber = async () => {
+    await http.post('/phone-numbers', newPhone);
+    setNewPhone({ phoneNumberId: '', displayPhoneNumber: '', verifiedName: '' });
+    notify('Número cadastrado');
+    load();
+  };
+
+  const activatePhone = async (id) => {
+    await http.post(`/phone-numbers/${id}/activate`);
+    notify('Número ativo atualizado');
+    load();
+  };
+
+  const deletePhone = async (id) => {
+    await http.delete(`/phone-numbers/${id}`);
+    notify('Número removido do sistema');
+    load();
+  };
+
+  const createList = async () => {
+    await http.post('/lists', { name: newListName });
+    setNewListName('');
+    notify('Lista salva');
+    load();
+  };
+
+  const createCustomField = async () => {
+    await http.post('/custom-fields', newField);
+    setNewField({ key: '', label: '', type: 'text' });
+    notify('Campo personalizado salvo');
+    load();
+  };
+
+  const openContact = async (id) => {
+    const { data } = await http.get(`/contacts/${id}`);
+    setSelectedContact(data);
+  };
+
+  const openTemplate = async (id) => {
+    const { data } = await http.get(`/templates/${id}`);
+    setSelectedTemplate(data);
   };
 
   const createContact = async () => {
@@ -256,11 +333,14 @@ function App() {
   const createSend = async (forceNow = null) => {
     await http.post('/campaigns', {
       name: send.name,
-      listIds: send.listId ? [send.listId] : [],
+      listIds: send.listIds,
       templateName: send.templateName,
       language: send.language,
       responseFlowId: send.responseFlowId || null,
-      exclusionListIds: send.exclusionListIds.split(',').map((x) => x.trim()).filter(Boolean),
+      exclusionListIds: send.exclusionListIds,
+      buttonFlowMap: send.buttonFlowMap,
+      parameterMap: send.parameterMap,
+      phoneNumberId: send.phoneNumberId || null,
       scheduledAt: send.scheduledAt || null,
       sendNow: forceNow ?? send.sendNow,
     });
@@ -268,9 +348,37 @@ function App() {
     load();
   };
 
+  const toggleArray = (field, id) => {
+    setSend((current) => {
+      const currentValues = new Set(current[field] || []);
+      if (currentValues.has(id)) currentValues.delete(id);
+      else currentValues.add(id);
+      return { ...current, [field]: Array.from(currentValues) };
+    });
+  };
+
+  const setButtonFlow = (buttonText, flowId) => {
+    setSend((current) => ({ ...current, buttonFlowMap: { ...current.buttonFlowMap, [buttonText]: flowId } }));
+  };
+
+  const setParamField = (param, fieldKey) => {
+    setSend((current) => ({ ...current, parameterMap: { ...current.parameterMap, [param]: fieldKey } }));
+  };
+
   const openConversation = async (id) => {
     const { data } = await http.get(`/inbox/${id}`);
     setSelectedConversation(data);
+  };
+
+  const windowLabel = (conversation) => {
+    const raw = conversation?.conversation?.lastInboundAt;
+    if (!raw) return 'sem janela';
+    const closeAt = new Date(new Date(raw).getTime() + 24 * 60 * 60 * 1000);
+    const ms = closeAt.getTime() - Date.now();
+    if (ms <= 0) return 'fechada';
+    const hours = Math.floor(ms / 3600000);
+    const minutes = Math.floor((ms % 3600000) / 60000);
+    return `${hours}h ${minutes}min restantes`;
   };
 
   const reply = async () => {
@@ -327,7 +435,7 @@ function App() {
             <Field label="Phone Number ID"><input value={meta.phoneNumberId || ''} onChange={(e) => updateMeta('phoneNumberId', e.target.value)} /></Field>
             <Field label="Access Token"><input value={meta.accessToken || ''} onChange={(e) => updateMeta('accessToken', e.target.value)} placeholder={settings.meta?.accessTokenPreview || ''} /></Field>
           </div>
-          <div className="inline-actions"><Button onClick={saveMeta}>Salvar conexão</Button><Button variant="secondary" onClick={syncTemplates}>Sincronizar modelos</Button></div>
+          <div className="inline-actions"><Button onClick={saveMeta}>Salvar conexão</Button><Button variant="secondary" onClick={syncPhoneNumbers}>Sincronizar números</Button><Button variant="secondary" onClick={syncTemplates}>Sincronizar modelos</Button></div>
           <div className="copy-grid">
             <div className="notice">
               <span>Callback URL</span>
@@ -340,10 +448,50 @@ function App() {
               <Button variant="secondary" onClick={() => copyText('simplific-one-api-webhook', 'Token')}>Copiar token</Button>
             </div>
           </div>
+          <div className="subpanel">
+            <h3>Números conectados</h3>
+            <div className="form-row">
+              <Field label="Phone Number ID"><input value={newPhone.phoneNumberId} onChange={(e) => setNewPhone({ ...newPhone, phoneNumberId: e.target.value })} placeholder="ID do número na Meta" /></Field>
+              <Field label="Número exibido"><input value={newPhone.displayPhoneNumber} onChange={(e) => setNewPhone({ ...newPhone, displayPhoneNumber: e.target.value })} placeholder="+55..." /></Field>
+              <Field label="Nome verificado"><input value={newPhone.verifiedName} onChange={(e) => setNewPhone({ ...newPhone, verifiedName: e.target.value })} /></Field>
+              <Field label="Ação"><Button disabled={!newPhone.phoneNumberId} onClick={addPhoneNumber}>Adicionar número</Button></Field>
+            </div>
+            <div className="table">
+              {phoneNumbers.length === 0 ? <p className="muted">Nenhum número sincronizado ainda.</p> : phoneNumbers.map((phone) => (
+                <div className="row" key={phone.phoneNumberId || phone.id}>
+                  <b>{phone.displayPhoneNumber || phone.phoneNumberId || phone.id}</b>
+                  <span>{phone.verifiedName || 'sem nome verificado'}</span>
+                  <span>Qualidade: {phone.qualityRating || 'UNKNOWN'}</span>
+                  <span>Limite: {phone.messagingLimitTier || 'UNKNOWN'}</span>
+                  <div className="row-actions">
+                    <Button variant={phone.active ? 'primary' : 'secondary'} onClick={() => activatePhone(phone.phoneNumberId || phone.id)}>{phone.active ? 'Ativo' : 'Ativar'}</Button>
+                    <Button variant="secondary" onClick={() => deletePhone(phone.phoneNumberId || phone.id)}>Remover</Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </section>}
 
         {tab === 'contacts' && <section className="panel stack">
           <h2>Contatos e listas</h2>
+          <div className="two-col">
+            <div className="subpanel">
+              <h3>Salvar lista</h3>
+              <Field label="Nome da lista"><input value={newListName} onChange={(e) => setNewListName(e.target.value)} /></Field>
+              <Button disabled={!newListName} onClick={createList}>Salvar lista</Button>
+              <p className="muted">{lists.length} listas cadastradas</p>
+            </div>
+            <div className="subpanel">
+              <h3>Salvar campo personalizado</h3>
+              <div className="composer-grid">
+                <Field label="Chave"><input value={newField.key} onChange={(e) => setNewField({ ...newField, key: e.target.value })} placeholder="cidade" /></Field>
+                <Field label="Rótulo"><input value={newField.label} onChange={(e) => setNewField({ ...newField, label: e.target.value })} placeholder="Cidade" /></Field>
+              </div>
+              <Button disabled={!newField.key} onClick={createCustomField}>Salvar campo</Button>
+              <p className="muted">{customFields.length} campos cadastrados</p>
+            </div>
+          </div>
           <div className="subpanel">
             <h3>Importar CSV</h3>
             <div className="form-row">
@@ -364,23 +512,85 @@ function App() {
             </div>
             <Button onClick={createContact}>Salvar contato</Button>
           </div>
-          <div className="table">{contacts.map((c) => <div className="row" key={c.id}><b>{c.name || 'Sem nome'}</b><span>{c.phone}</span><span>{(c.tags || []).map(tagName).join(', ') || '-'}</span><span>{(c.lists || []).map(listName).join(', ') || '-'}</span></div>)}</div>
+          <div className="two-col wide-left">
+            <div className="table">{contacts.map((c) => <button className="row clickable" onClick={() => openContact(c.id)} key={c.id}><b>{c.name || 'Sem nome'}</b><span>{c.phone}</span><span>{(c.tags || []).map(tagName).join(', ') || '-'}</span><span>{(c.lists || []).map(listName).join(', ') || '-'}</span></button>)}</div>
+            <div className="subpanel">
+              <h3>Detalhes do contato</h3>
+              {!selectedContact ? <p className="muted">Clique em um contato para ver dados completos.</p> : <>
+                <b>{selectedContact.contact.name || 'Sem nome'}</b>
+                <span>{selectedContact.contact.phone}</span>
+                <p>Listas: {(selectedContact.contact.lists || []).map(listName).join(', ') || '-'}</p>
+                <p>Tags: {(selectedContact.contact.tags || []).map(tagName).join(', ') || '-'}</p>
+                <p>Campos: {Object.entries(selectedContact.contact.customFields || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '-'}</p>
+                <p className="muted">{selectedContact.messages.length} mensagens registradas</p>
+              </>}
+            </div>
+          </div>
         </section>}
 
         {tab === 'templates' && <section className="panel stack">
           <div className="section-head"><h2>Modelos</h2><Button onClick={syncTemplates}><CloudArrowUp size={14} /> Sincronizar da Meta</Button></div>
-          <div className="table">{templates.map((t) => <div className="row" key={t.id}><b>{t.name}</b><span>{t.language}</span><span>{t.status || 'manual'}</span><span>{t.bodyPreview || '-'}</span></div>)}</div>
+          <div className="two-col wide-left">
+            <div className="table">{templates.map((t) => <button className="row clickable" onClick={() => openTemplate(t.id)} key={t.id}><b>{t.name}</b><span>{t.language}</span><span>{t.category || '-'}</span><span>{t.status || 'manual'}</span></button>)}</div>
+            <div className="subpanel">
+              <h3>Conteúdo do modelo</h3>
+              {!selectedTemplate ? <p className="muted">Clique em um modelo para ver corpo, botões e parâmetros.</p> : <>
+                <b>{selectedTemplate.name}</b>
+                <span>{selectedTemplate.category} · {selectedTemplate.language} · {selectedTemplate.status}</span>
+                <p className="template-preview">{selectedTemplate.bodyPreview || '-'}</p>
+                <p>Botões: {(selectedTemplate.buttons || []).map((b) => b.text).join(', ') || '-'}</p>
+                <p>Parâmetros: {(selectedTemplate.params || []).map((p) => `{{${p}}}`).join(', ') || '-'}</p>
+              </>}
+            </div>
+          </div>
         </section>}
 
         {tab === 'sends' && <section className="panel stack">
           <h2>Envios</h2>
           <div className="form-row">
             <Field label="Nome do envio"><input value={send.name} onChange={(e) => setSend({ ...send, name: e.target.value })} /></Field>
-            <Field label="Lista"><select value={send.listId} onChange={(e) => setSend({ ...send, listId: e.target.value })}><option value="">Todos os contatos</option>{lists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></Field>
-            <Field label="Template"><select value={send.templateName} onChange={(e) => setSend({ ...send, templateName: e.target.value })}><option value="">Selecione</option>{templates.map((t) => <option key={t.id} value={t.name}>{t.name} · {t.language}</option>)}</select></Field>
-            <Field label="Fluxo de resposta"><select value={send.responseFlowId} onChange={(e) => setSend({ ...send, responseFlowId: e.target.value })}><option value="">Nenhum</option>{flows.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}</select></Field>
-            <Field label="Listas de exclusão"><input value={send.exclusionListIds} onChange={(e) => setSend({ ...send, exclusionListIds: e.target.value })} placeholder="IDs separados por vírgula" /></Field>
+            <Field label="Número de envio"><select value={send.phoneNumberId} onChange={(e) => setSend({ ...send, phoneNumberId: e.target.value })}><option value="">Padrão ativo</option>{phoneNumbers.map((p) => <option key={p.phoneNumberId || p.id} value={p.phoneNumberId || p.id}>{p.displayPhoneNumber || p.phoneNumberId || p.id}</option>)}</select></Field>
+            <Field label="Template"><select value={send.templateName} onChange={(e) => {
+              const tpl = templates.find((t) => t.name === e.target.value);
+              setSend({ ...send, templateName: e.target.value, language: tpl?.language || 'pt_BR', buttonFlowMap: {}, parameterMap: {} });
+            }}><option value="">Selecione</option>{templates.map((t) => <option key={t.id} value={t.name}>{t.name} · {t.category || '-'} · {t.language}</option>)}</select></Field>
             <Field label="Agendar"><input type="datetime-local" value={send.scheduledAt} onChange={(e) => setSend({ ...send, scheduledAt: e.target.value, sendNow: false })} /></Field>
+          </div>
+          <div className="two-col">
+            <div className="subpanel">
+              <h3>Listas de destino</h3>
+              <div className="check-list">{lists.map((l) => <label key={l.id}><input type="checkbox" checked={send.listIds.includes(l.id)} onChange={() => toggleArray('listIds', l.id)} /> {l.name}</label>)}</div>
+            </div>
+            <div className="subpanel">
+              <h3>Listas de exclusão</h3>
+              <div className="check-list">{lists.map((l) => <label key={l.id}><input type="checkbox" checked={send.exclusionListIds.includes(l.id)} onChange={() => toggleArray('exclusionListIds', l.id)} /> {l.name}</label>)}</div>
+            </div>
+          </div>
+          {selectedSendTemplate && <div className="subpanel">
+            <h3>{selectedSendTemplate.name} · {selectedSendTemplate.category}</h3>
+            <p className="template-preview">{selectedSendTemplate.bodyPreview || '-'}</p>
+            {selectedTemplateParams.length > 0 && <div className="form-row">
+              {selectedTemplateParams.map((param) => <Field key={param} label={`Parâmetro {{${param}}}`}>
+                <select value={send.parameterMap[param] || ''} onChange={(e) => setParamField(param, e.target.value)}>
+                  <option value="">Selecione campo</option>
+                  <option value="name">Nome do contato</option>
+                  <option value="phone">Telefone</option>
+                  {customFields.map((field) => <option key={field.key} value={field.key}>{field.label || field.key}</option>)}
+                </select>
+              </Field>)}
+            </div>}
+            {selectedTemplateButtons.length > 0 && <div className="form-row">
+              {selectedTemplateButtons.map((button) => <Field key={button.text} label={`Fluxo: ${button.text}`}>
+                <select value={send.buttonFlowMap[button.text] || ''} onChange={(e) => setButtonFlow(button.text, e.target.value)}>
+                  <option value="">Nenhum</option>{flows.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                </select>
+              </Field>)}
+            </div>}
+          </div>}
+          <div className="grid mini-grid">
+            <Metric icon={UsersThree} label="Selecionados" value={audience.included || 0} />
+            <Metric icon={Tag} label="Excluídos" value={audience.excluded || 0} />
+            <Metric icon={PaperPlaneTilt} label="Receberão" value={audience.receivers || 0} />
           </div>
           <div className="inline-actions"><Button onClick={() => createSend(true)} disabled={!send.name || !send.templateName}>Disparar agora</Button><Button variant="secondary" onClick={() => createSend(false)} disabled={!send.name || !send.templateName}>Salvar/agendar</Button></div>
           <div className="table">{campaigns.map((c) => <div className="row" key={c.id}><b>{c.name}</b><span>{c.templateName}</span><span>{c.status}</span><span>{c.sent || 0}/{c.targetCount || 0}</span></div>)}</div>
@@ -395,17 +605,20 @@ function App() {
         </section>}
 
         {tab === 'inbox' && <section className="panel inbox-panel">
-          <div>
-            <h2>Inbox</h2>
-            <div className="inbox-list">{inbox.map((c) => <button key={c.id} onClick={() => openConversation(c.id)} className={selectedConversation?.conversation?.id === c.id ? 'selected' : ''}><b>{c.name || c.phone}</b><span>{c.lastMessage?.text || c.lastMessage?.type || '-'}</span></button>)}</div>
-          </div>
-          <div className="conversation">
+          <aside className="lead-side">
+            <h2>Lead</h2>
+            {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <div className="lead-card vertical"><b>{selectedConversation.contact?.name || selectedConversation.conversation.phone}</b><span>{selectedConversation.conversation.phone}</span><span>Janela: {windowLabel(selectedConversation)}</span><span>Tags: {(selectedConversation.contact?.tags || []).map(tagName).join(', ') || '-'}</span><span>Listas: {(selectedConversation.contact?.lists || []).map(listName).join(', ') || '-'}</span><span>Campos: {Object.entries(selectedConversation.contact?.customFields || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '-'}</span></div>}
+          </aside>
+          <div className="conversation main-conversation">
             {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <>
-              <div className="lead-card"><b>{selectedConversation.contact?.name || selectedConversation.conversation.phone}</b><span>{selectedConversation.conversation.phone}</span><span>Janela: {selectedConversation.window?.open ? 'aberta' : 'fechada'}</span><span>Tags: {(selectedConversation.contact?.tags || []).map(tagName).join(', ') || '-'}</span><span>Listas: {(selectedConversation.contact?.lists || []).map(listName).join(', ') || '-'}</span><span>Campos: {Object.entries(selectedConversation.contact?.customFields || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '-'}</span></div>
               <div className="messages">{selectedConversation.messages.map((m) => <div key={m.id} className={`bubble ${m.direction}`}><span>{m.text || m.type}</span><small>{new Date(m.createdAt).toLocaleString('pt-BR')}</small></div>)}</div>
               <SequenceEditor items={replyItems} setItems={setReplyItems} notify={notify} />
               <Button onClick={reply} disabled={replyItems.length === 0}>Responder</Button>
             </>}
+          </div>
+          <div>
+            <h2>Conversas</h2>
+            <div className="inbox-list">{inbox.map((c) => <button key={c.id} onClick={() => openConversation(c.id)} className={selectedConversation?.conversation?.id === c.id ? 'selected' : ''}><b>{c.name || c.phone}</b><span>{c.lastMessage?.text || c.lastMessage?.type || '-'}</span></button>)}</div>
           </div>
         </section>}
       </section>

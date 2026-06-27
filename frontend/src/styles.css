@@ -12,8 +12,8 @@
 body {
   margin: 0;
   background:
-    linear-gradient(rgba(132, 255, 0, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(132, 255, 0, 0.045) 1px, transparent 1px),
+    linear-gradient(rgba(255, 122, 24, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 122, 24, 0.045) 1px, transparent 1px),
     #050505;
   background-size: 32px 32px;
 }
@@ -45,8 +45,8 @@ textarea {
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: rgba(132, 255, 0, 0.75);
-  box-shadow: 0 0 0 3px rgba(132, 255, 0, 0.08);
+  border-color: rgba(255, 122, 24, 0.75);
+  box-shadow: 0 0 0 3px rgba(255, 122, 24, 0.08);
 }
 
 .shell {
@@ -74,7 +74,7 @@ aside {
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: #84ff00;
+  background: #ff7a18;
   color: #050505;
   font-weight: 900;
   font-size: 24px;
@@ -88,7 +88,7 @@ aside {
 }
 
 .brand span {
-  color: #84ff00;
+  color: #ff7a18;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
   letter-spacing: 0.2em;
@@ -115,8 +115,8 @@ nav button {
 
 nav button.active {
   color: #fff;
-  border-color: #84ff00;
-  background: rgba(132, 255, 0, 0.08);
+  border-color: #ff7a18;
+  background: rgba(255, 122, 24, 0.08);
 }
 
 .content {
@@ -131,7 +131,7 @@ header {
 }
 
 header p {
-  color: #84ff00;
+  color: #ff7a18;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   letter-spacing: 0.18em;
@@ -166,8 +166,8 @@ h2 {
 }
 
 .status.ok {
-  border-color: rgba(132, 255, 0, 0.35);
-  color: #84ff00;
+  border-color: rgba(255, 122, 24, 0.35);
+  color: #ff7a18;
 }
 
 .status.warn {
@@ -196,7 +196,7 @@ h2 {
 }
 
 .metric svg {
-  color: #84ff00;
+  color: #ff7a18;
 }
 
 .metric span {
@@ -224,7 +224,7 @@ h2 {
 
 .panel.inbox-panel {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 280px minmax(0, 1fr) 320px;
   min-height: 620px;
 }
 
@@ -249,7 +249,7 @@ li {
 }
 
 .checks svg {
-  color: #84ff00;
+  color: #ff7a18;
   flex-shrink: 0;
 }
 
@@ -298,7 +298,7 @@ li {
 }
 
 .notice code {
-  color: #84ff00;
+  color: #ff7a18;
   overflow-wrap: anywhere;
 }
 
@@ -319,6 +319,67 @@ li {
 
 .composer-grid {
   grid-template-columns: 1fr 1fr;
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.two-col.wide-left {
+  grid-template-columns: minmax(0, 1.5fr) minmax(300px, 0.8fr);
+}
+
+.row.clickable {
+  width: 100%;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #27272a;
+  cursor: pointer;
+  text-align: left;
+}
+
+.row.clickable:hover {
+  background: rgba(255, 122, 24, 0.06);
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.check-list {
+  display: grid;
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.check-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #d4d4d8;
+}
+
+.check-list input {
+  width: auto;
+}
+
+.mini-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.template-preview {
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  background: #09090b;
+  padding: 12px;
+  white-space: pre-wrap;
 }
 
 .field {
@@ -353,7 +414,7 @@ li {
 }
 
 .btn.primary {
-  background: #84ff00;
+  background: #ff7a18;
   color: #050505;
 }
 
@@ -435,8 +496,8 @@ li {
 }
 
 .inbox-list button.selected {
-  border-color: rgba(132, 255, 0, 0.65);
-  background: rgba(132, 255, 0, 0.08);
+  border-color: rgba(255, 122, 24, 0.65);
+  background: rgba(255, 122, 24, 0.08);
 }
 
 .inbox-list span {
@@ -456,6 +517,21 @@ li {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px 14px;
+}
+
+.lead-card.vertical {
+  grid-template-columns: 1fr;
+}
+
+.lead-side {
+  border: 0;
+  border-right: 1px solid #27272a;
+  background: transparent;
+  padding: 0 16px 0 0;
+}
+
+.main-conversation {
+  min-width: 0;
 }
 
 .lead-card b,
@@ -494,8 +570,8 @@ li {
 
 .bubble.out {
   justify-self: end;
-  background: rgba(132, 255, 0, 0.1);
-  border-color: rgba(132, 255, 0, 0.25);
+  background: rgba(255, 122, 24, 0.1);
+  border-color: rgba(255, 122, 24, 0.25);
 }
 
 .bubble small {
@@ -506,9 +582,9 @@ li {
   position: fixed;
   right: 20px;
   bottom: 20px;
-  border: 1px solid rgba(132, 255, 0, 0.35);
+  border: 1px solid rgba(255, 122, 24, 0.35);
   background: #0a0a0a;
-  color: #84ff00;
+  color: #ff7a18;
   border-radius: 8px;
   padding: 12px 14px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -529,6 +605,8 @@ li {
   .panel,
   .panel.inbox-panel,
   .copy-grid,
+  .two-col,
+  .two-col.wide-left,
   .form-row,
   .composer-grid,
   .sequence-item,
