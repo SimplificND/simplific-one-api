@@ -687,6 +687,18 @@ li {
   gap: 12px;
 }
 
+.campaign-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.campaign-dates span {
+  color: var(--muted);
+  font-family: "Spline Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
 .campaign-main div {
   min-width: 0;
   display: grid;

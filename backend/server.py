@@ -348,6 +348,15 @@ def attach_labels(contact: dict[str, Any], tags: list[str], lists: list[str], cu
     contact["updatedAt"] = now_iso()
 
 
+def meta_message_id(response: Any) -> Optional[str]:
+    if not isinstance(response, dict):
+        return None
+    messages = response.get("messages") or []
+    if messages and isinstance(messages[0], dict):
+        return messages[0].get("id")
+    return response.get("id")
+
+
 async def meta_send(item: MessageItem, phone: str) -> dict[str, Any]:
     if not configured_meta():
         return {"mock": True, "reason": "META_ACCESS_TOKEN or META_PHONE_NUMBER_ID not configured"}
@@ -416,6 +425,7 @@ async def send_sequence(phone: str, items: list[MessageItem], source: str = "man
             "payload": item.model_dump(),
             "status": status,
             "source": source,
+            "providerMessageId": meta_message_id(response),
             "providerResponse": response,
             "error": error,
             "createdAt": now_iso(),
@@ -427,13 +437,15 @@ async def send_sequence(phone: str, items: list[MessageItem], source: str = "man
     return results
 
 
-async def set_pending_response_flow(phone: str, response_flow_id: Optional[str] = None, button_flow_map: Optional[dict[str, str]] = None) -> None:
+async def set_pending_response_flow(phone: str, response_flow_id: Optional[str] = None, button_flow_map: Optional[dict[str, str]] = None, campaign_id: Optional[str] = None) -> None:
     data = store.read()
     contact = upsert_contact(data, phone)
     if button_flow_map:
         contact["pendingResponseFlows"] = button_flow_map
     elif response_flow_id:
         contact["pendingResponseFlowId"] = response_flow_id
+    if campaign_id:
+        contact["pendingCampaignId"] = campaign_id
     await store.write(data)
 
 
@@ -530,7 +542,8 @@ async def execute_campaign(campaign_id: str) -> None:
             )],
             source=f"campaign:{campaign_id}",
         )
-        if any(msg["status"] == "sent" for msg in result):
+        sent_message = next((msg for msg in result if msg["status"] == "sent"), None)
+        if sent_message:
             sent += 1
         else:
             failed += 1
@@ -538,15 +551,23 @@ async def execute_campaign(campaign_id: str) -> None:
             "contactId": contact.get("id"),
             "name": contact.get("name"),
             "phone": contact.get("phone"),
-            "status": "sent" if any(msg["status"] == "sent" for msg in result) else "failed",
+            "status": "sent" if sent_message else "failed",
             "messageIds": [msg.get("id") for msg in result],
+            "providerMessageIds": [msg.get("providerMessageId") for msg in result if msg.get("providerMessageId")],
+            "sentAt": sent_message.get("createdAt") if sent_message else None,
+            "deliveredAt": None,
+            "readAt": None,
+            "clickedAt": None,
+            "buttonText": None,
             "error": next((msg.get("error") for msg in result if msg.get("error")), None),
             "createdAt": now_iso(),
         })
         if body.buttonFlowMap:
-            await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap)
+            await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap, campaign_id=campaign_id)
         elif body.responseFlowId:
-            await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId)
+            await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId, campaign_id=campaign_id)
+        else:
+            await set_pending_response_flow(contact["phone"], campaign_id=campaign_id)
 
     data = store.read()
     campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
@@ -555,6 +576,9 @@ async def execute_campaign(campaign_id: str) -> None:
             "status": "done",
             "sent": sent,
             "failed": failed,
+            "delivered": sum(1 for row in delivery_results if row.get("deliveredAt")),
+            "read": sum(1 for row in delivery_results if row.get("readAt")),
+            "buttonClicks": sum(1 for row in delivery_results if row.get("clickedAt")),
             "results": delivery_results,
             "lastError": next((row.get("error") for row in reversed(delivery_results) if row.get("error")), None),
             "finishedAt": now_iso(),
@@ -661,6 +685,80 @@ def extract_webhook_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return messages
 
 
+def extract_webhook_statuses(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for entry in payload.get("entry", []) or []:
+        for change in entry.get("changes", []) or []:
+            value = change.get("value") or {}
+            for raw in value.get("statuses", []) or []:
+                statuses.append({
+                    "providerMessageId": raw.get("id"),
+                    "status": raw.get("status"),
+                    "phone": (raw.get("recipient_id") or ""),
+                    "payload": raw,
+                    "createdAt": now_iso(),
+                })
+    return statuses
+
+
+def update_campaign_delivery_from_status(data: dict[str, Any], status: dict[str, Any]) -> None:
+    provider_id = status.get("providerMessageId")
+    status_name = status.get("status")
+    if not provider_id or status_name not in {"delivered", "read", "failed", "sent"}:
+        return
+    timestamp_field = {
+        "delivered": "deliveredAt",
+        "read": "readAt",
+        "sent": "sentAt",
+    }.get(status_name)
+    for msg in data["messages"]:
+        if msg.get("providerMessageId") == provider_id:
+            msg["deliveryStatus"] = status_name
+            msg["deliveryPayload"] = status.get("payload")
+            msg["deliveryUpdatedAt"] = status["createdAt"]
+            if status_name == "failed":
+                msg["status"] = "failed"
+                msg["error"] = (status.get("payload") or {}).get("errors")
+            break
+    for campaign in data["campaigns"]:
+        changed = False
+        for row in campaign.get("results") or []:
+            if provider_id in (row.get("providerMessageIds") or []):
+                if timestamp_field:
+                    row[timestamp_field] = row.get(timestamp_field) or status["createdAt"]
+                if status_name == "failed":
+                    row["status"] = "failed"
+                    row["error"] = (status.get("payload") or {}).get("errors") or row.get("error")
+                changed = True
+        if changed:
+            campaign["delivered"] = sum(1 for row in campaign.get("results") or [] if row.get("deliveredAt") or row.get("readAt"))
+            campaign["read"] = sum(1 for row in campaign.get("results") or [] if row.get("readAt"))
+            campaign["failed"] = sum(1 for row in campaign.get("results") or [] if row.get("status") == "failed")
+            campaign["sent"] = sum(1 for row in campaign.get("results") or [] if row.get("status") == "sent")
+            campaign["lastStatusAt"] = status["createdAt"]
+
+
+def update_campaign_click_from_inbound(data: dict[str, Any], inbound: dict[str, Any]) -> None:
+    button_text = inbound.get("buttonText")
+    if not button_text:
+        return
+    phone = normalize_phone(inbound.get("phone") or "")
+    contact = next((c for c in data["contacts"] if c.get("phone") == phone), None)
+    campaign_id = contact.get("pendingCampaignId") if contact else None
+    if not campaign_id:
+        return
+    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+    if not campaign:
+        return
+    for row in campaign.get("results") or []:
+        if row.get("phone") == phone:
+            row["clickedAt"] = row.get("clickedAt") or inbound["createdAt"]
+            row["buttonText"] = button_text
+            break
+    campaign["buttonClicks"] = sum(1 for row in campaign.get("results") or [] if row.get("clickedAt"))
+    campaign["lastClickAt"] = inbound["createdAt"]
+
+
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     cfg = meta_config()
@@ -711,6 +809,9 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> dict
     data = store.read()
     data["webhookEvents"].append({"id": new_id("evt"), "payload": payload, "createdAt": now_iso()})
     inbound_messages = extract_webhook_messages(payload)
+    delivery_statuses = extract_webhook_statuses(payload)
+    for status in delivery_statuses:
+        update_campaign_delivery_from_status(data, status)
     for inbound in inbound_messages:
         contact = upsert_contact(data, inbound["phone"], inbound.get("name"))
         convo = conversation_for(data, contact["phone"], contact.get("name"))
@@ -729,10 +830,11 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> dict
             "status": "received",
             "createdAt": inbound["createdAt"],
         })
+        update_campaign_click_from_inbound(data, inbound)
     await store.write(data)
     for inbound in inbound_messages:
         background.add_task(run_matching_automations, inbound["phone"], inbound)
-    return {"received": True, "time": now_iso(), "messages": len(inbound_messages)}
+    return {"received": True, "time": now_iso(), "messages": len(inbound_messages), "statuses": len(delivery_statuses)}
 
 
 @app.get("/api/settings")
@@ -1302,6 +1404,9 @@ async def create_campaign(body: TemplateCampaignIn, background: BackgroundTasks)
         "targetCount": len(contacts),
         "sent": 0,
         "failed": 0,
+        "delivered": 0,
+        "read": 0,
+        "buttonClicks": 0,
         "results": [],
         "lastError": None,
         "config": body.model_dump(),

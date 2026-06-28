@@ -311,6 +311,12 @@ function App() {
     if (date.toDateString() === yesterday.toDateString()) return 'Ontem';
     return date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
   };
+  const formatDateTime = (value) => {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '-';
+    return date.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+  };
   const messagePreview = (message) => message?.text || message?.payload?.caption || message?.payload?.mediaUrl || message?.type || '-';
   const campaignStatusLabel = (status) => ({
     running: 'Processando',
@@ -832,12 +838,20 @@ function App() {
                   </div>
                   <strong className={`campaign-badge ${campaignStatusClass(campaign)}`}>{campaignStatusLabel(campaign.status)}</strong>
                 </div>
+                <div className="campaign-dates">
+                  <span>Criado: {formatDateTime(campaign.createdAt)}</span>
+                  <span>Início: {formatDateTime(campaign.startedAt || campaign.scheduledAt)}</span>
+                  <span>Fim: {formatDateTime(campaign.finishedAt)}</span>
+                </div>
                 <div className="campaign-stats">
                   <span><b>{campaign.targetCount || 0}</b> receberiam</span>
                   <span><b>{campaign.sent || 0}</b> enviados</span>
+                  <span><b>{campaign.delivered || 0}</b> entregues</span>
+                  <span><b>{campaign.read || 0}</b> abriram</span>
+                  <span><b>{campaign.buttonClicks || 0}</b> cliques</span>
                   <span><b>{campaign.failed || 0}</b> falhas</span>
                 </div>
-                {campaign.lastError && <p className="campaign-error">Último erro: {compactError(campaign.lastError)}</p>}
+                {(campaign.lastError || (campaign.results || []).some((row) => row.error)) && <p className="campaign-error">Falha: {compactError(campaign.lastError || (campaign.results || []).find((row) => row.error)?.error)}</p>}
                 {(campaign.results || []).length > 0 && <details>
                   <summary>Ver detalhes por lead</summary>
                   <div className="campaign-detail-list">
@@ -845,6 +859,12 @@ function App() {
                       <div key={`${row.phone}-${index}`} className={row.status === 'sent' ? 'sent' : 'failed'}>
                         <span>{row.name || row.phone}</span>
                         <b>{row.status === 'sent' ? 'enviado' : 'falhou'}</b>
+                        <small>
+                          Enviado: {formatDateTime(row.sentAt || row.createdAt)}
+                          {' · '}Entregue: {formatDateTime(row.deliveredAt)}
+                          {' · '}Aberto: {formatDateTime(row.readAt)}
+                          {' · '}Clique: {row.buttonText ? `${row.buttonText} (${formatDateTime(row.clickedAt)})` : '-'}
+                        </small>
                         {row.error && <small>{compactError(row.error)}</small>}
                       </div>
                     ))}
