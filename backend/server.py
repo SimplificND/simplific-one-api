@@ -574,6 +574,14 @@ async def execute_campaign(campaign_id: str) -> None:
             sent += 1
         else:
             failed += 1
+        row_error = next((msg.get("error") for msg in result if msg.get("error")), None)
+        row_error_text = next((msg.get("errorText") for msg in result if msg.get("errorText")), None)
+        if not sent_message and not row_error_text:
+            row_error_text = (
+                "Envio nao foi aceito, mas a Meta nao retornou motivo. "
+                "Verifique se o template esta aprovado no idioma escolhido, se todos os parametros "
+                "obrigatorios foram preenchidos, se o telefone tem DDI e se o Phone Number ID esta correto."
+            )
         delivery_results.append({
             "contactId": contact.get("id"),
             "name": contact.get("name"),
@@ -586,8 +594,16 @@ async def execute_campaign(campaign_id: str) -> None:
             "readAt": None,
             "clickedAt": None,
             "buttonText": None,
-            "error": next((msg.get("error") for msg in result if msg.get("error")), None),
-            "errorText": next((msg.get("errorText") for msg in result if msg.get("errorText")), None),
+            "error": row_error,
+            "errorText": row_error_text,
+            "diagnostic": {
+                "campaignId": campaign_id,
+                "templateName": body.templateName,
+                "language": body.language,
+                "phoneNumberId": body.phoneNumberId or active_phone_number_id(),
+                "phone": contact.get("phone"),
+                "templateParams": template_params,
+            },
             "createdAt": now_iso(),
         })
         if body.buttonFlowMap:

@@ -342,8 +342,14 @@ function App() {
     || compactError(campaign.lastError)
     || (campaign.results || []).find((row) => row.errorText)?.errorText
     || compactError((campaign.results || []).find((row) => row.error)?.error)
-    || (campaign.failed > 0 ? 'A Meta marcou falha, mas não retornou o motivo no webhook/API.' : '')
+    || (campaign.failed > 0 ? 'Falha sem motivo retornado pela Meta. Abra os detalhes do lead e confira template, idioma, telefone, parâmetros e número remetente.' : '')
   );
+  const campaignDiagnosticText = (diagnostic) => {
+    if (!diagnostic) return '';
+    const params = diagnostic.templateParams || {};
+    const paramsText = Object.keys(params).length ? JSON.stringify(params) : 'sem parâmetros';
+    return `Template: ${diagnostic.templateName || '-'} · idioma: ${diagnostic.language || '-'} · remetente: ${diagnostic.phoneNumberId || '-'} · parâmetros: ${paramsText}`;
+  };
   const activeName = selectedConversation?.contact?.name || selectedConversation?.conversation?.name || selectedConversation?.conversation?.phone || 'Lead';
   const activePhone = selectedConversation?.conversation?.phone || '';
   const filteredInbox = inbox.filter((conversation) => {
@@ -873,7 +879,12 @@ function App() {
                           {' · '}Aberto: {formatDateTime(row.readAt)}
                           {' · '}Clique: {row.buttonText ? `${row.buttonText} (${formatDateTime(row.clickedAt)})` : '-'}
                         </small>
-                        {(row.errorText || row.error) && <small>Motivo: {row.errorText || compactError(row.error)}</small>}
+                        {row.status === 'failed' && (
+                          <small>Motivo: {row.errorText || compactError(row.error) || 'Falha sem motivo retornado pela Meta.'}</small>
+                        )}
+                        {row.status === 'failed' && campaignDiagnosticText(row.diagnostic) && (
+                          <small>Diagnóstico: {campaignDiagnosticText(row.diagnostic)}</small>
+                        )}
                       </div>
                     ))}
                   </div>
