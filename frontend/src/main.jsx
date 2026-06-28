@@ -4,15 +4,23 @@ import axios from 'axios';
 import {
   ChatCircleText,
   CheckCircle,
+  Clock,
   CloudArrowUp,
   Database,
+  DotsThreeVertical,
+  FloppyDisk,
   FlowArrow,
   Gear,
   GitBranch,
+  ImageSquare,
+  MagnifyingGlass,
   Moon,
   PaperPlaneTilt,
+  Paperclip,
   Plus,
   Robot,
+  Smiley,
+  Stack,
   Sun,
   Tag,
   UploadSimple,
@@ -158,6 +166,9 @@ function App() {
   const [audience, setAudience] = useState({ included: 0, excluded: 0, receivers: 0 });
   const [leadDraft, setLeadDraft] = useState({ name: '', tags: [], lists: [], customFields: {} });
   const [toast, setToast] = useState('');
+  const [inboxSearch, setInboxSearch] = useState('');
+  const [inboxFilter, setInboxFilter] = useState('all');
+  const [inboxComposerMode, setInboxComposerMode] = useState('reply');
 
   const [meta, setMeta] = useState({ appId: '', appSecret: '', wabaId: '', phoneNumberId: '', accessToken: '', businessName: '' });
   const [contact, setContact] = useState({ name: '', phone: '', tags: '', lists: '', customFields: '' });
@@ -267,6 +278,49 @@ function App() {
   const selectedSendTemplate = templates.find((t) => t.name === send.templateName && (!send.language || t.language === send.language)) || templates.find((t) => t.name === send.templateName);
   const selectedTemplateButtons = selectedSendTemplate?.buttons || [];
   const selectedTemplateParams = selectedSendTemplate?.params || [];
+  const initials = (value) => String(value || 'Lead')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join('') || 'LD';
+  const isWindowOpen = (conversation) => {
+    const raw = conversation?.lastInboundAt || conversation?.conversation?.lastInboundAt;
+    if (!raw) return false;
+    return new Date(raw).getTime() > Date.now() - 24 * 60 * 60 * 1000;
+  };
+  const windowPercent = (conversation) => {
+    const raw = conversation?.lastInboundAt || conversation?.conversation?.lastInboundAt;
+    if (!raw) return 0;
+    const closeAt = new Date(raw).getTime() + 24 * 60 * 60 * 1000;
+    const remaining = Math.max(0, closeAt - Date.now());
+    return Math.max(4, Math.min(100, Math.round((remaining / (24 * 60 * 60 * 1000)) * 100)));
+  };
+  const formatTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const now = new Date();
+    const sameDay = date.toDateString() === now.toDateString();
+    if (sameDay) return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (date.toDateString() === yesterday.toDateString()) return 'Ontem';
+    return date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  };
+  const messagePreview = (message) => message?.text || message?.payload?.caption || message?.payload?.mediaUrl || message?.type || '-';
+  const activeName = selectedConversation?.contact?.name || selectedConversation?.conversation?.name || selectedConversation?.conversation?.phone || 'Lead';
+  const activePhone = selectedConversation?.conversation?.phone || '';
+  const filteredInbox = inbox.filter((conversation) => {
+    const query = inboxSearch.trim().toLowerCase();
+    const haystack = `${conversation.name || ''} ${conversation.phone || ''} ${messagePreview(conversation.lastMessage)}`.toLowerCase();
+    const matchesSearch = !query || haystack.includes(query);
+    const matchesFilter = inboxFilter === 'all'
+      || (inboxFilter === 'unread' && Number(conversation.unread || 0) > 0)
+      || (inboxFilter === 'open' && isWindowOpen(conversation));
+    return matchesSearch && matchesFilter;
+  });
 
   const saveMeta = async () => {
     await http.post('/meta/settings', meta);
@@ -702,39 +756,128 @@ function App() {
           <div className="table">{flows.map((f) => <div className="row" key={f.id}><b>{f.name}</b><span>{f.triggerValue || '-'}</span><span>{(f.actions || []).length} ações</span><span>{f.enabled ? 'ativo' : 'pausado'}</span></div>)}</div>
         </section>}
 
-        {tab === 'inbox' && <section className="panel inbox-panel">
-          <div>
-            <h2>Conversas</h2>
-            <div className="inbox-list">{inbox.map((c) => <button key={c.id} onClick={() => openConversation(c.id)} className={selectedConversation?.conversation?.id === c.id ? 'selected' : ''}><b>{c.name || c.phone}</b><span>{c.lastMessage?.text || c.lastMessage?.type || '-'}</span></button>)}</div>
-          </div>
-          <div className="conversation main-conversation">
-            {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <>
-              <div className="messages">{selectedConversation.messages.map((m) => <div key={m.id} className={`bubble ${m.direction}`}><span>{m.text || m.type}</span><small>{new Date(m.createdAt).toLocaleString('pt-BR')}</small></div>)}</div>
-              <SequenceEditor items={replyItems} setItems={setReplyItems} notify={notify} />
-              <Button onClick={reply} disabled={replyItems.length === 0}>Responder</Button>
+        {tab === 'inbox' && <section className="inbox-panel">
+          <aside className="inbox-conversations">
+            <div className="inbox-column-head">
+              <div className="inbox-title-row">
+                <h2>Conversas</h2>
+                <span>{inbox.length} ativas</span>
+              </div>
+              <label className="inbox-search">
+                <MagnifyingGlass size={16} />
+                <input value={inboxSearch} onChange={(e) => setInboxSearch(e.target.value)} placeholder="Buscar contato ou mensagem" />
+              </label>
+              <div className="inbox-chips">
+                <button className={inboxFilter === 'all' ? 'active' : ''} onClick={() => setInboxFilter('all')}>Todas</button>
+                <button className={inboxFilter === 'unread' ? 'active' : ''} onClick={() => setInboxFilter('unread')}>Não lidas</button>
+                <button className={inboxFilter === 'open' ? 'active' : ''} onClick={() => setInboxFilter('open')}>Janela aberta</button>
+              </div>
+            </div>
+            <div className="inbox-list">
+              {filteredInbox.length === 0 ? <p className="muted">Nenhuma conversa encontrada.</p> : filteredInbox.map((conversation) => (
+                <button key={conversation.id} onClick={() => openConversation(conversation.id)} className={selectedConversation?.conversation?.id === conversation.id ? 'selected' : ''}>
+                  <div className="conversation-avatar">
+                    <span>{initials(conversation.name || conversation.phone)}</span>
+                    <i className={isWindowOpen(conversation) ? 'online' : ''} />
+                  </div>
+                  <div className="conversation-preview">
+                    <div><b>{conversation.name || conversation.phone}</b><time>{formatTime(conversation.lastMessageAt || conversation.lastMessage?.createdAt)}</time></div>
+                    <div><span>{messagePreview(conversation.lastMessage)}</span>{Number(conversation.unread || 0) > 0 && <em>{conversation.unread}</em>}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </aside>
+
+          <section className="inbox-thread">
+            {!selectedConversation ? <div className="inbox-empty"><ChatCircleText size={34} /><p>Selecione uma conversa para visualizar o atendimento.</p></div> : <>
+              <div className="thread-head">
+                <div className="thread-contact">
+                  <div className="conversation-avatar large"><span>{initials(activeName)}</span><i className="online" /></div>
+                  <div>
+                    <b>{activeName}</b>
+                    <span>{activePhone} <i /> online</span>
+                  </div>
+                </div>
+                <div className="thread-tools">
+                  <div className="window-meter">
+                    <div><Clock size={14} /><b>Janela de atendimento</b><span>{windowLabel(selectedConversation)}</span></div>
+                    <progress value={windowPercent(selectedConversation)} max="100" />
+                  </div>
+                  <button title="Enviar modelo"><PaperPlaneTilt size={17} /></button>
+                  <button title="Mais opções"><DotsThreeVertical size={17} /></button>
+                </div>
+              </div>
+
+              <div className="messages">
+                <div className="date-divider"><span /> <b>{new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long' })}</b> <span /></div>
+                {selectedConversation.messages.map((message) => {
+                  const isOut = message.direction === 'out';
+                  const templateName = message.payload?.templateName;
+                  return (
+                    <div key={message.id} className={`message-line ${isOut ? 'out' : 'in'}`}>
+                      <div className="message-wrap">
+                        {templateName && <span className="template-label"><Stack size={12} /> Modelo · {templateName}</span>}
+                        <div className="bubble"><span>{messagePreview(message)}</span></div>
+                        <small>{formatTime(message.createdAt)} {isOut && <i>✓✓</i>}</small>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="inbox-composer">
+                <div className="composer-tabs">
+                  <button className={inboxComposerMode === 'reply' ? 'active' : ''} onClick={() => setInboxComposerMode('reply')}><ChatCircleText size={14} /> Responder</button>
+                  <button className={inboxComposerMode === 'flow' ? 'active' : ''} onClick={() => setInboxComposerMode('flow')}><FlowArrow size={14} /> Fluxo</button>
+                </div>
+                {inboxComposerMode === 'reply' ? (
+                  <div className="reply-card">
+                    <SequenceEditor items={replyItems} setItems={setReplyItems} notify={notify} />
+                    <div className="composer-shortcuts">
+                      <span><Paperclip size={16} /></span>
+                      <span><ImageSquare size={16} /></span>
+                      <span><Smiley size={16} /></span>
+                      <span className="model-shortcut"><Stack size={15} /> Modelo</span>
+                      <Button onClick={reply} disabled={replyItems.length === 0}>Responder <PaperPlaneTilt size={15} /></Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flow-card">
+                    <div><b>Automação da conversa</b><span>Nenhuma ação configurada</span></div>
+                    <SequenceEditor items={flowActions} setItems={setFlowActions} notify={notify} />
+                    <Button variant="secondary" onClick={createFlow} disabled={!flow.name}>Salvar fluxo</Button>
+                  </div>
+                )}
+              </div>
             </>}
-          </div>
+          </section>
+
           <aside className="lead-side">
-            <h2>Lead</h2>
-            {!selectedConversation ? <p className="muted">Selecione uma conversa.</p> : <div className="lead-card vertical">
-              <b>{selectedConversation.contact?.name || selectedConversation.conversation.phone}</b>
-              <span>{selectedConversation.conversation.phone}</span>
-              <span>Janela: {windowLabel(selectedConversation)}</span>
-              <Field label="Nome"><input value={leadDraft.name} onChange={(e) => setLeadDraft({ ...leadDraft, name: e.target.value })} /></Field>
-              <div className="subpanel compact">
-                <h3>Listas</h3>
-                <div className="check-list">{lists.length === 0 ? <span>Nenhuma lista cadastrada.</span> : lists.map((list) => <label key={list.id}><input type="checkbox" checked={(leadDraft.lists || []).includes(list.id)} onChange={() => toggleLeadDraft('lists', list.id)} /> {list.name}</label>)}</div>
+            {!selectedConversation ? <div className="inbox-empty compact"><UsersThree size={30} /><p>Dados do lead aparecem aqui.</p></div> : <>
+              <div className="lead-profile">
+                <div>{initials(activeName)}</div>
+                <h2>{activeName}</h2>
+                <span>{activePhone}</span>
+                <b><Clock size={13} /> Janela: {windowLabel(selectedConversation)}</b>
               </div>
-              <div className="subpanel compact">
-                <h3>Tags</h3>
-                <div className="check-list">{tags.length === 0 ? <span>Nenhuma tag cadastrada.</span> : tags.map((tag) => <label key={tag.id}><input type="checkbox" checked={(leadDraft.tags || []).includes(tag.id)} onChange={() => toggleLeadDraft('tags', tag.id)} /> {tag.name}</label>)}</div>
+              <div className="lead-body">
+                <Field label="Nome"><input value={leadDraft.name} onChange={(e) => setLeadDraft({ ...leadDraft, name: e.target.value })} /></Field>
+                <section>
+                  <div className="lead-section-title"><span>Listas</span><button>+ Adicionar</button></div>
+                  <div className="lead-check-list">{lists.length === 0 ? <p className="muted">Nenhuma lista cadastrada.</p> : lists.map((list) => <label key={list.id}><input type="checkbox" checked={(leadDraft.lists || []).includes(list.id)} onChange={() => toggleLeadDraft('lists', list.id)} /> <span>{list.name}</span></label>)}</div>
+                </section>
+                <section>
+                  <div className="lead-section-title"><span>Tags</span><button>+ Nova tag</button></div>
+                  <div className="tag-cloud">{tags.length === 0 ? <span className="tag-chip empty">+ tag</span> : tags.map((tag) => <button key={tag.id} className={(leadDraft.tags || []).includes(tag.id) ? 'tag-chip active' : 'tag-chip'} onClick={() => toggleLeadDraft('tags', tag.id)}>{tag.name}</button>)}</div>
+                </section>
+                {customFields.length > 0 && <section>
+                  <div className="lead-section-title"><span>Campos personalizados</span></div>
+                  {customFields.map((field) => <Field key={field.key} label={field.label || field.key}><input value={(leadDraft.customFields || {})[field.key] || ''} onChange={(e) => setLeadCustomField(field.key, e.target.value)} placeholder="-" /></Field>)}
+                </section>}
               </div>
-              {customFields.length > 0 && <div className="subpanel compact">
-                <h3>Campos</h3>
-                {customFields.map((field) => <Field key={field.key} label={field.label || field.key}><input value={(leadDraft.customFields || {})[field.key] || ''} onChange={(e) => setLeadCustomField(field.key, e.target.value)} /></Field>)}
-              </div>}
-              <Button onClick={saveInboxLead}>Salvar lead</Button>
-            </div>}
+              <div className="lead-footer"><Button onClick={saveInboxLead}><FloppyDisk size={15} /> Salvar lead</Button></div>
+            </>}
           </aside>
         </section>}
       </section>
