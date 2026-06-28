@@ -9,9 +9,11 @@ import {
   FlowArrow,
   Gear,
   GitBranch,
+  Moon,
   PaperPlaneTilt,
   Plus,
   Robot,
+  Sun,
   Tag,
   UploadSimple,
   UsersThree,
@@ -30,7 +32,17 @@ function Field({ label, children }) {
 }
 
 function Metric({ icon: Icon, label, value }) {
-  return <div className="metric"><Icon size={22} weight="duotone" /><div><span>{label}</span><strong>{value}</strong></div></div>;
+  return <div className="metric"><div><span>{label}</span><strong>{value}</strong></div><Icon size={20} weight="duotone" /></div>;
+}
+
+function ThemeToggle({ theme, onToggle }) {
+  const Icon = theme === 'dark' ? Moon : Sun;
+  return (
+    <button className="theme-toggle" onClick={onToggle} type="button">
+      <Icon size={16} weight="duotone" />
+      {theme === 'dark' ? 'Escuro' : 'Claro'}
+    </button>
+  );
 }
 
 function SequenceEditor({ items, setItems, notify }) {
@@ -121,6 +133,13 @@ function SequenceEditor({ items, setItems, notify }) {
 
 function App() {
   const [tab, setTab] = useState('overview');
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem('s1-theme') === 'dark' ? 'dark' : 'light';
+    } catch {
+      return 'light';
+    }
+  });
   const [health, setHealth] = useState(null);
   const [settings, setSettings] = useState({});
   const [dashboard, setDashboard] = useState({});
@@ -154,6 +173,14 @@ function App() {
   const [replyItems, setReplyItems] = useState([]);
   const [metaHydrated, setMetaHydrated] = useState(false);
   const metaHydratedRef = useRef(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('s1-theme', theme);
+    } catch {
+      // localStorage can be blocked in private contexts.
+    }
+  }, [theme]);
 
   const notify = (msg) => {
     setToast(msg);
@@ -457,19 +484,30 @@ function App() {
   };
 
   return (
-    <main className="shell">
+    <main className="shell" data-theme={theme}>
       <aside>
-        <div className="brand"><div className="mark">S</div><div><b>Simplific</b><span>ONE | API</span></div></div>
+        <div className="brand">
+          <b>Simplific</b>
+          <span>ONE <i /> API</span>
+        </div>
+        <div className="sidebar-status">
+          <span>Conexão oficial</span>
+          <b className={health?.ok ? 'online' : ''}>{health?.ok ? 'Backend online' : 'Backend offline'}</b>
+        </div>
         <nav>{nav.map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={16} /> {label}</button>)}</nav>
       </aside>
       <section className="content">
         <header>
-          <p>// MOTOR OFICIAL WHATSAPP</p>
-          <h1>Simplific ONE API</h1>
-          <div className="status-row">
-            <span className={health?.ok ? 'status ok' : 'status'}>{health?.ok ? 'backend online' : 'backend offline'}</span>
-            <span className={health?.metaConfigured ? 'status ok' : 'status warn'}>{health?.metaConfigured ? 'número conectado' : 'conexão pendente'}</span>
+          <div>
+            <p>// MOTOR OFICIAL WHATSAPP</p>
+            <h1>Simplific ONE <em>API</em></h1>
+            <small>A conexão oficial da Meta para WhatsApp: contatos, modelos, envios e automações em um só lugar.</small>
+            <div className="status-row">
+              <span className={health?.ok ? 'status ok' : 'status'}>{health?.ok ? 'backend online' : 'backend offline'}</span>
+              <span className={health?.metaConfigured ? 'status ok' : 'status warn'}>{health?.metaConfigured ? 'número conectado' : 'conexão pendente'}</span>
+            </div>
           </div>
+          <ThemeToggle theme={theme} onToggle={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} />
         </header>
 
         {tab === 'overview' && <>
