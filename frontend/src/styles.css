@@ -1147,14 +1147,26 @@ li {
   gap: 8px;
 }
 
-.composer-shortcuts span {
+.hidden-file {
+  display: none;
+}
+
+.composer-shortcuts button:not(.btn) {
   min-width: 34px;
   min-height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border: 0;
   border-radius: 9px;
+  background: transparent;
   color: var(--muted);
+  cursor: pointer;
+}
+
+.composer-shortcuts button:not(.btn):hover {
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent);
 }
 
 .composer-shortcuts .model-shortcut {
