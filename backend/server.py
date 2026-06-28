@@ -357,6 +357,32 @@ def meta_message_id(response: Any) -> Optional[str]:
     return response.get("id")
 
 
+def readable_error(error: Any) -> Optional[str]:
+    if not error:
+        return None
+    if isinstance(error, str):
+        return error
+    if isinstance(error, list):
+        parts = [readable_error(item) for item in error]
+        return " | ".join([part for part in parts if part]) or json.dumps(error, ensure_ascii=False)
+    if isinstance(error, dict):
+        meta_error = error.get("error") if isinstance(error.get("error"), dict) else error
+        details = [
+            meta_error.get("message"),
+            meta_error.get("error_data", {}).get("details") if isinstance(meta_error.get("error_data"), dict) else None,
+            meta_error.get("title"),
+            meta_error.get("details"),
+        ]
+        code = meta_error.get("code")
+        subcode = meta_error.get("error_subcode") or meta_error.get("subcode")
+        suffix = " ".join([f"code:{code}" if code else "", f"subcode:{subcode}" if subcode else ""]).strip()
+        text = " · ".join([str(item) for item in details if item])
+        if suffix:
+            text = f"{text} ({suffix})" if text else suffix
+        return text or json.dumps(error, ensure_ascii=False)
+    return str(error)
+
+
 async def meta_send(item: MessageItem, phone: str) -> dict[str, Any]:
     if not configured_meta():
         return {"mock": True, "reason": "META_ACCESS_TOKEN or META_PHONE_NUMBER_ID not configured"}
@@ -428,6 +454,7 @@ async def send_sequence(phone: str, items: list[MessageItem], source: str = "man
             "providerMessageId": meta_message_id(response),
             "providerResponse": response,
             "error": error,
+            "errorText": readable_error(error),
             "createdAt": now_iso(),
         }
         data["messages"].append(msg)
@@ -560,6 +587,7 @@ async def execute_campaign(campaign_id: str) -> None:
             "clickedAt": None,
             "buttonText": None,
             "error": next((msg.get("error") for msg in result if msg.get("error")), None),
+            "errorText": next((msg.get("errorText") for msg in result if msg.get("errorText")), None),
             "createdAt": now_iso(),
         })
         if body.buttonFlowMap:
@@ -581,6 +609,7 @@ async def execute_campaign(campaign_id: str) -> None:
             "buttonClicks": sum(1 for row in delivery_results if row.get("clickedAt")),
             "results": delivery_results,
             "lastError": next((row.get("error") for row in reversed(delivery_results) if row.get("error")), None),
+            "lastErrorText": next((row.get("errorText") for row in reversed(delivery_results) if row.get("errorText")), None),
             "finishedAt": now_iso(),
         })
     await store.write(data)
@@ -719,6 +748,7 @@ def update_campaign_delivery_from_status(data: dict[str, Any], status: dict[str,
             if status_name == "failed":
                 msg["status"] = "failed"
                 msg["error"] = (status.get("payload") or {}).get("errors")
+                msg["errorText"] = readable_error(msg["error"])
             break
     for campaign in data["campaigns"]:
         changed = False
@@ -729,12 +759,15 @@ def update_campaign_delivery_from_status(data: dict[str, Any], status: dict[str,
                 if status_name == "failed":
                     row["status"] = "failed"
                     row["error"] = (status.get("payload") or {}).get("errors") or row.get("error")
+                    row["errorText"] = readable_error(row.get("error")) or row.get("errorText")
                 changed = True
         if changed:
             campaign["delivered"] = sum(1 for row in campaign.get("results") or [] if row.get("deliveredAt") or row.get("readAt"))
             campaign["read"] = sum(1 for row in campaign.get("results") or [] if row.get("readAt"))
             campaign["failed"] = sum(1 for row in campaign.get("results") or [] if row.get("status") == "failed")
             campaign["sent"] = sum(1 for row in campaign.get("results") or [] if row.get("status") == "sent")
+            campaign["lastError"] = next((row.get("error") for row in reversed(campaign.get("results") or []) if row.get("error")), None)
+            campaign["lastErrorText"] = next((row.get("errorText") for row in reversed(campaign.get("results") or []) if row.get("errorText")), None)
             campaign["lastStatusAt"] = status["createdAt"]
 
 

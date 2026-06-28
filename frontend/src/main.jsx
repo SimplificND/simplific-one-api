@@ -334,8 +334,16 @@ function App() {
   const compactError = (error) => {
     if (!error) return '';
     if (typeof error === 'string') return error;
+    if (Array.isArray(error)) return error.map(compactError).filter(Boolean).join(' | ');
     return error?.error?.message || error?.message || error?.detail || JSON.stringify(error);
   };
+  const campaignErrorText = (campaign) => (
+    campaign.lastErrorText
+    || compactError(campaign.lastError)
+    || (campaign.results || []).find((row) => row.errorText)?.errorText
+    || compactError((campaign.results || []).find((row) => row.error)?.error)
+    || (campaign.failed > 0 ? 'A Meta marcou falha, mas não retornou o motivo no webhook/API.' : '')
+  );
   const activeName = selectedConversation?.contact?.name || selectedConversation?.conversation?.name || selectedConversation?.conversation?.phone || 'Lead';
   const activePhone = selectedConversation?.conversation?.phone || '';
   const filteredInbox = inbox.filter((conversation) => {
@@ -851,7 +859,7 @@ function App() {
                   <span><b>{campaign.buttonClicks || 0}</b> cliques</span>
                   <span><b>{campaign.failed || 0}</b> falhas</span>
                 </div>
-                {(campaign.lastError || (campaign.results || []).some((row) => row.error)) && <p className="campaign-error">Falha: {compactError(campaign.lastError || (campaign.results || []).find((row) => row.error)?.error)}</p>}
+                {campaignErrorText(campaign) && <p className="campaign-error">Falha: {campaignErrorText(campaign)}</p>}
                 {(campaign.results || []).length > 0 && <details>
                   <summary>Ver detalhes por lead</summary>
                   <div className="campaign-detail-list">
@@ -865,7 +873,7 @@ function App() {
                           {' · '}Aberto: {formatDateTime(row.readAt)}
                           {' · '}Clique: {row.buttonText ? `${row.buttonText} (${formatDateTime(row.clickedAt)})` : '-'}
                         </small>
-                        {row.error && <small>{compactError(row.error)}</small>}
+                        {(row.errorText || row.error) && <small>Motivo: {row.errorText || compactError(row.error)}</small>}
                       </div>
                     ))}
                   </div>
