@@ -550,7 +550,7 @@ function App() {
         </div>
         <nav>{nav.map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={16} /> {label}</button>)}</nav>
       </aside>
-      <section className="content">
+      <section className={tab === 'inbox' ? 'content content-inbox' : 'content'}>
         <header>
           <div>
             <p>// MOTOR OFICIAL WHATSAPP</p>

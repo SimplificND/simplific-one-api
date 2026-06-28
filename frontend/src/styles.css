@@ -207,6 +207,28 @@ nav button.active {
   padding: 48px 54px 64px;
 }
 
+.content.content-inbox {
+  width: 100%;
+  max-width: none;
+  padding: 22px 32px 32px;
+}
+
+.content-inbox header {
+  margin-bottom: 16px;
+}
+
+.content-inbox h1 {
+  font-size: clamp(30px, 3vw, 42px);
+}
+
+.content-inbox header small {
+  display: none;
+}
+
+.content-inbox .status-row {
+  margin-top: 12px;
+}
+
 header {
   display: flex;
   align-items: flex-start;
@@ -644,11 +666,11 @@ li {
 }
 
 .inbox-panel {
-  height: min(920px, calc(100vh - 170px));
-  min-height: 720px;
+  height: calc(100vh - 220px);
+  min-height: 560px;
   display: grid;
-  grid-template-columns: 336px minmax(420px, 1fr) 340px;
-  margin-top: 18px;
+  grid-template-columns: minmax(290px, 336px) minmax(460px, 1fr) minmax(300px, 340px);
+  margin-top: 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -855,6 +877,7 @@ li {
 
 .inbox-thread {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: radial-gradient(120% 80% at 50% 0%, rgba(var(--accent-rgb), 0.05), transparent 55%);
@@ -964,6 +987,7 @@ li {
 
 .messages {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -1053,9 +1077,12 @@ li {
 }
 
 .inbox-composer {
+  flex: 0 0 auto;
+  max-height: min(360px, 42vh);
+  overflow: auto;
   border-top: 1px solid var(--border);
   background: var(--surface-soft);
-  padding: 16px 26px 22px;
+  padding: 12px 22px 16px;
 }
 
 .composer-tabs {
@@ -1102,12 +1129,16 @@ li {
 }
 
 .reply-card .sequence-list {
-  max-height: 150px;
+  max-height: 96px;
   overflow: auto;
 }
 
 .reply-card .composer-grid {
   grid-template-columns: 1fr 130px;
+}
+
+.reply-card textarea {
+  min-height: 64px;
 }
 
 .composer-shortcuts {
@@ -1152,6 +1183,7 @@ li {
   display: flex;
   flex-direction: column;
   overflow: auto;
+  min-height: 0;
 }
 
 .lead-profile {
