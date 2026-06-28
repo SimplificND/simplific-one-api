@@ -385,6 +385,24 @@ function App() {
     load();
   };
 
+  const createInboxList = async () => {
+    const name = window.prompt('Nome da nova lista');
+    if (!name?.trim()) return;
+    const { data } = await http.post('/lists', { name: name.trim() });
+    setLeadDraft((current) => ({ ...current, lists: Array.from(new Set([...(current.lists || []), data.id])) }));
+    notify('Lista criada e marcada no lead');
+    load();
+  };
+
+  const createInboxTag = async () => {
+    const name = window.prompt('Nome da nova tag');
+    if (!name?.trim()) return;
+    const { data } = await http.post('/tags', { name: name.trim(), color: '#E0B870' });
+    setLeadDraft((current) => ({ ...current, tags: Array.from(new Set([...(current.tags || []), data.id])) }));
+    notify('Tag criada e marcada no lead');
+    load();
+  };
+
   const createCustomField = async () => {
     await http.post('/custom-fields', newField);
     setNewField({ key: '', label: '', type: 'text' });
@@ -864,11 +882,11 @@ function App() {
               <div className="lead-body">
                 <Field label="Nome"><input value={leadDraft.name} onChange={(e) => setLeadDraft({ ...leadDraft, name: e.target.value })} /></Field>
                 <section>
-                  <div className="lead-section-title"><span>Listas</span><button>+ Adicionar</button></div>
+                  <div className="lead-section-title"><span>Listas</span><button type="button" onClick={createInboxList}>+ Adicionar</button></div>
                   <div className="lead-check-list">{lists.length === 0 ? <p className="muted">Nenhuma lista cadastrada.</p> : lists.map((list) => <label key={list.id}><input type="checkbox" checked={(leadDraft.lists || []).includes(list.id)} onChange={() => toggleLeadDraft('lists', list.id)} /> <span>{list.name}</span></label>)}</div>
                 </section>
                 <section>
-                  <div className="lead-section-title"><span>Tags</span><button>+ Nova tag</button></div>
+                  <div className="lead-section-title"><span>Tags</span><button type="button" onClick={createInboxTag}>+ Nova tag</button></div>
                   <div className="tag-cloud">{tags.length === 0 ? <span className="tag-chip empty">+ tag</span> : tags.map((tag) => <button key={tag.id} className={(leadDraft.tags || []).includes(tag.id) ? 'tag-chip active' : 'tag-chip'} onClick={() => toggleLeadDraft('tags', tag.id)}>{tag.name}</button>)}</div>
                 </section>
                 {customFields.length > 0 && <section>
