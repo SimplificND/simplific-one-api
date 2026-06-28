@@ -510,6 +510,7 @@ async def execute_campaign(campaign_id: str) -> None:
 
     sent = 0
     failed = 0
+    delivery_results: list[dict[str, Any]] = []
     body = TemplateCampaignIn(**campaign["config"])
     contacts = contacts_for_campaign(data, body)
     for contact in contacts:
@@ -533,6 +534,15 @@ async def execute_campaign(campaign_id: str) -> None:
             sent += 1
         else:
             failed += 1
+        delivery_results.append({
+            "contactId": contact.get("id"),
+            "name": contact.get("name"),
+            "phone": contact.get("phone"),
+            "status": "sent" if any(msg["status"] == "sent" for msg in result) else "failed",
+            "messageIds": [msg.get("id") for msg in result],
+            "error": next((msg.get("error") for msg in result if msg.get("error")), None),
+            "createdAt": now_iso(),
+        })
         if body.buttonFlowMap:
             await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap)
         elif body.responseFlowId:
@@ -541,7 +551,14 @@ async def execute_campaign(campaign_id: str) -> None:
     data = store.read()
     campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
     if campaign:
-        campaign.update({"status": "done", "sent": sent, "failed": failed, "finishedAt": now_iso()})
+        campaign.update({
+            "status": "done",
+            "sent": sent,
+            "failed": failed,
+            "results": delivery_results,
+            "lastError": next((row.get("error") for row in reversed(delivery_results) if row.get("error")), None),
+            "finishedAt": now_iso(),
+        })
     await store.write(data)
 
 
@@ -1285,6 +1302,8 @@ async def create_campaign(body: TemplateCampaignIn, background: BackgroundTasks)
         "targetCount": len(contacts),
         "sent": 0,
         "failed": 0,
+        "results": [],
+        "lastError": None,
         "config": body.model_dump(),
         "status": status,
         "createdAt": now_iso(),

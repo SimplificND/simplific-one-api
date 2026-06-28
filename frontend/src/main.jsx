@@ -312,6 +312,24 @@ function App() {
     return date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
   };
   const messagePreview = (message) => message?.text || message?.payload?.caption || message?.payload?.mediaUrl || message?.type || '-';
+  const campaignStatusLabel = (status) => ({
+    running: 'Processando',
+    scheduled: 'Agendado',
+    draft: 'Rascunho',
+    done: 'Concluído',
+    failed: 'Falhou',
+  }[status] || status || '-');
+  const campaignStatusClass = (campaign) => {
+    if (campaign.failed > 0) return 'warn';
+    if (campaign.status === 'done') return 'good';
+    if (campaign.status === 'running') return 'running';
+    return 'neutral';
+  };
+  const compactError = (error) => {
+    if (!error) return '';
+    if (typeof error === 'string') return error;
+    return error?.error?.message || error?.message || error?.detail || JSON.stringify(error);
+  };
   const activeName = selectedConversation?.contact?.name || selectedConversation?.conversation?.name || selectedConversation?.conversation?.phone || 'Lead';
   const activePhone = selectedConversation?.conversation?.phone || '';
   const filteredInbox = inbox.filter((conversation) => {
@@ -804,7 +822,37 @@ function App() {
             <Metric icon={PaperPlaneTilt} label="Receberão" value={audience.receivers || 0} />
           </div>
           <div className="inline-actions"><Button onClick={() => createSend(true)} disabled={!send.name || !send.templateName}>Disparar agora</Button><Button variant="secondary" onClick={() => createSend(false)} disabled={!send.name || !send.templateName}>Salvar/agendar</Button></div>
-          <div className="table">{campaigns.map((c) => <div className="row" key={c.id}><b>{c.name}</b><span>{c.templateName}</span><span>{c.status}</span><span>{c.sent || 0}/{c.targetCount || 0}</span></div>)}</div>
+          <div className="campaign-results">
+            {campaigns.length === 0 ? <p className="muted">Nenhum envio criado ainda.</p> : campaigns.map((campaign) => (
+              <article className="campaign-card" key={campaign.id}>
+                <div className="campaign-main">
+                  <div>
+                    <b>{campaign.name}</b>
+                    <span>{campaign.templateName} · {campaign.language}</span>
+                  </div>
+                  <strong className={`campaign-badge ${campaignStatusClass(campaign)}`}>{campaignStatusLabel(campaign.status)}</strong>
+                </div>
+                <div className="campaign-stats">
+                  <span><b>{campaign.targetCount || 0}</b> receberiam</span>
+                  <span><b>{campaign.sent || 0}</b> enviados</span>
+                  <span><b>{campaign.failed || 0}</b> falhas</span>
+                </div>
+                {campaign.lastError && <p className="campaign-error">Último erro: {compactError(campaign.lastError)}</p>}
+                {(campaign.results || []).length > 0 && <details>
+                  <summary>Ver detalhes por lead</summary>
+                  <div className="campaign-detail-list">
+                    {(campaign.results || []).map((row, index) => (
+                      <div key={`${row.phone}-${index}`} className={row.status === 'sent' ? 'sent' : 'failed'}>
+                        <span>{row.name || row.phone}</span>
+                        <b>{row.status === 'sent' ? 'enviado' : 'falhou'}</b>
+                        {row.error && <small>{compactError(row.error)}</small>}
+                      </div>
+                    ))}
+                  </div>
+                </details>}
+              </article>
+            ))}
+          </div>
         </section>}
 
         {tab === 'flows' && <section className="panel stack">
