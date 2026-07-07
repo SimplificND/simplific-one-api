@@ -302,7 +302,7 @@ def template_body_components(template_params: dict[str, Any]) -> list[dict[str, 
     }]
 
 
-def upsert_contact(data: dict[str, Any], phone: str, name: Optional[str] = None) -> dict[str, Any]:
+def upsert_contact(data: dict[str, Any], phone: str, name: Optional[str] = None, phone_number_id: Optional[str] = None) -> dict[str, Any]:
     normalized = normalize_phone(phone)
     if not normalized:
         raise HTTPException(400, "Telefone inválido")
@@ -310,6 +310,8 @@ def upsert_contact(data: dict[str, Any], phone: str, name: Optional[str] = None)
     if contact:
         if name and not contact.get("name"):
             contact["name"] = name
+        if phone_number_id:
+            contact["lastPhoneNumberId"] = phone_number_id
         contact.setdefault("customFields", {})
         contact["updatedAt"] = now_iso()
         return contact
@@ -317,6 +319,7 @@ def upsert_contact(data: dict[str, Any], phone: str, name: Optional[str] = None)
         "id": new_id("lead"),
         "name": name,
         "phone": normalized,
+        "lastPhoneNumberId": phone_number_id,
         "tags": [],
         "lists": [],
         "customFields": {},
@@ -327,14 +330,19 @@ def upsert_contact(data: dict[str, Any], phone: str, name: Optional[str] = None)
     return contact
 
 
-def conversation_for(data: dict[str, Any], phone: str, name: Optional[str] = None) -> dict[str, Any]:
+def conversation_for(data: dict[str, Any], phone: str, name: Optional[str] = None, phone_number_id: Optional[str] = None) -> dict[str, Any]:
     normalized = normalize_phone(phone)
-    convo = next((c for c in data["conversations"] if c["phone"] == normalized), None)
+    convo = next((c for c in data["conversations"] if c["phone"] == normalized and (c.get("phoneNumberId") or "") == (phone_number_id or "")), None)
+    if not convo and not phone_number_id:
+        convo = next((c for c in data["conversations"] if c["phone"] == normalized), None)
     if convo:
+        if phone_number_id and not convo.get("phoneNumberId"):
+            convo["phoneNumberId"] = phone_number_id
         return convo
     convo = {
         "id": new_id("conv"),
         "phone": normalized,
+        "phoneNumberId": phone_number_id,
         "name": name,
         "unread": 0,
         "lastMessageAt": now_iso(),
@@ -430,10 +438,13 @@ async def meta_send(item: MessageItem, phone: str) -> dict[str, Any]:
 
 async def send_sequence(phone: str, items: list[MessageItem], source: str = "manual") -> list[dict[str, Any]]:
     data = store.read()
-    contact = upsert_contact(data, phone)
-    convo = conversation_for(data, phone, contact.get("name"))
+    sequence_phone_number_id = next((item.phoneNumberId for item in items if item.phoneNumberId), None) or active_phone_number_id(data)
+    contact = upsert_contact(data, phone, phone_number_id=sequence_phone_number_id)
+    convo = conversation_for(data, phone, contact.get("name"), sequence_phone_number_id)
     results: list[dict[str, Any]] = []
     for index, item in enumerate(items):
+        if not item.phoneNumberId and sequence_phone_number_id:
+            item.phoneNumberId = sequence_phone_number_id
         if item.delaySeconds:
             await asyncio.sleep(item.delaySeconds)
         status = "sent"
@@ -449,6 +460,7 @@ async def send_sequence(phone: str, items: list[MessageItem], source: str = "man
             "conversationId": convo["id"],
             "contactId": contact["id"],
             "phone": contact["phone"],
+            "phoneNumberId": item.phoneNumberId or sequence_phone_number_id,
             "direction": "out",
             "type": item.type,
             "text": item.text or item.caption or item.templateName or item.mediaUrl,
@@ -510,6 +522,7 @@ async def run_flow_for_contact(phone: str, flow_id: str, source: str = "flow") -
     if not flow:
         return {"skipped": True, "reason": "flow_not_found_or_disabled"}
     contact = upsert_contact(data, phone)
+    flow_phone_number_id = contact.get("lastPhoneNumberId") or active_phone_number_id(data)
     sent_items: list[MessageItem] = []
     for action in flow.get("actions") or []:
         action_type = action.get("type")
@@ -520,9 +533,9 @@ async def run_flow_for_contact(phone: str, flow_id: str, source: str = "flow") -
         elif action_type == "add_lists":
             attach_labels(contact, [], action.get("lists") or [])
         elif action_type == "send_message":
-            sent_items.append(MessageItem(type="text", text=action.get("text"), delaySeconds=int(action.get("delaySeconds") or 0)))
+            sent_items.append(MessageItem(type="text", text=action.get("text"), phoneNumberId=flow_phone_number_id, delaySeconds=int(action.get("delaySeconds") or 0)))
         elif action_type in {"image", "video", "audio", "document"}:
-            sent_items.append(MessageItem(type=action_type, mediaUrl=action.get("mediaUrl"), caption=action.get("caption"), delaySeconds=int(action.get("delaySeconds") or 0)))
+            sent_items.append(MessageItem(type=action_type, mediaUrl=action.get("mediaUrl"), caption=action.get("caption"), phoneNumberId=flow_phone_number_id, delaySeconds=int(action.get("delaySeconds") or 0)))
     await store.write(data)
     results = await send_sequence(phone, sent_items, source=source) if sent_items else []
     return {"flowId": flow_id, "messages": len(results)}
@@ -671,7 +684,8 @@ def automation_matches(automation: dict[str, Any], inbound: dict[str, Any]) -> b
 
 async def run_matching_automations(phone: str, inbound: dict[str, Any]) -> None:
     data = store.read()
-    contact = upsert_contact(data, phone, inbound.get("name"))
+    channel_id = inbound.get("phoneNumberId")
+    contact = upsert_contact(data, phone, inbound.get("name"), channel_id)
     button_text = str(inbound.get("buttonText") or inbound.get("text") or "").strip()
     pending_map = contact.get("pendingResponseFlows") or {}
     pending_flow = pending_map.get(button_text) or contact.get("pendingResponseFlowId")
@@ -682,7 +696,7 @@ async def run_matching_automations(phone: str, inbound: dict[str, Any]) -> None:
         await store.write(data)
         await run_flow_for_contact(contact["phone"], pending_flow, source=f"button-flow:{pending_flow}")
         data = store.read()
-        contact = upsert_contact(data, phone, inbound.get("name"))
+        contact = upsert_contact(data, phone, inbound.get("name"), channel_id)
     matches = [a for a in data["automations"] if automation_matches(a, inbound)]
     for automation in matches:
         attach_labels(contact, automation.get("addTags") or [], automation.get("addLists") or [])
@@ -706,6 +720,9 @@ def extract_webhook_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for entry in payload.get("entry", []) or []:
         for change in entry.get("changes", []) or []:
             value = change.get("value") or {}
+            metadata = value.get("metadata") or {}
+            phone_number_id = metadata.get("phone_number_id")
+            display_phone_number = metadata.get("display_phone_number")
             contacts = {c.get("wa_id"): c.get("profile", {}).get("name") for c in value.get("contacts", []) or []}
             for raw in value.get("messages", []) or []:
                 phone = raw.get("from")
@@ -724,6 +741,8 @@ def extract_webhook_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 messages.append({
                     "providerId": raw.get("id"),
                     "phone": phone,
+                    "phoneNumberId": phone_number_id,
+                    "displayPhoneNumber": display_phone_number,
                     "name": contacts.get(phone),
                     "type": msg_type,
                     "text": text,
@@ -739,11 +758,14 @@ def extract_webhook_statuses(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for entry in payload.get("entry", []) or []:
         for change in entry.get("changes", []) or []:
             value = change.get("value") or {}
+            metadata = value.get("metadata") or {}
             for raw in value.get("statuses", []) or []:
                 statuses.append({
                     "providerMessageId": raw.get("id"),
                     "status": raw.get("status"),
                     "phone": (raw.get("recipient_id") or ""),
+                    "phoneNumberId": metadata.get("phone_number_id"),
+                    "displayPhoneNumber": metadata.get("display_phone_number"),
                     "payload": raw,
                     "createdAt": now_iso(),
                 })
@@ -866,8 +888,12 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> dict
     for status in delivery_statuses:
         update_campaign_delivery_from_status(data, status)
     for inbound in inbound_messages:
-        contact = upsert_contact(data, inbound["phone"], inbound.get("name"))
-        convo = conversation_for(data, contact["phone"], contact.get("name"))
+        channel_id = inbound.get("phoneNumberId")
+        contact = upsert_contact(data, inbound["phone"], inbound.get("name"), channel_id)
+        convo = conversation_for(data, contact["phone"], contact.get("name"), channel_id)
+        if channel_id:
+            convo["phoneNumberId"] = channel_id
+            convo["displayPhoneNumber"] = inbound.get("displayPhoneNumber")
         convo["unread"] = int(convo.get("unread") or 0) + 1
         convo["lastMessageAt"] = inbound["createdAt"]
         convo["lastInboundAt"] = inbound["createdAt"]
@@ -876,6 +902,8 @@ async def receive_webhook(request: Request, background: BackgroundTasks) -> dict
             "conversationId": convo["id"],
             "contactId": contact["id"],
             "phone": contact["phone"],
+            "phoneNumberId": channel_id,
+            "displayPhoneNumber": inbound.get("displayPhoneNumber"),
             "direction": "in",
             "type": inbound.get("type"),
             "text": inbound.get("text"),
@@ -1397,6 +1425,10 @@ async def reply_conversation(conversation_id: str, body: SendMessageIn) -> dict[
     if not convo:
         raise HTTPException(404, "Conversa não encontrada")
     phone = body.phone or convo["phone"]
+    channel_id = convo.get("phoneNumberId") or active_phone_number_id(data)
+    for item in body.items:
+        if not item.phoneNumberId:
+            item.phoneNumberId = channel_id
     results = await send_sequence(phone, body.items, source="inbox")
     return {"results": results}
 

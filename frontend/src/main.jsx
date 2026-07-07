@@ -168,6 +168,7 @@ function App() {
   const [toast, setToast] = useState('');
   const [inboxSearch, setInboxSearch] = useState('');
   const [inboxFilter, setInboxFilter] = useState('all');
+  const [inboxPhoneFilter, setInboxPhoneFilter] = useState('');
   const [inboxComposerMode, setInboxComposerMode] = useState('reply');
 
   const [meta, setMeta] = useState({ appId: '', appSecret: '', wabaId: '', phoneNumberId: '', accessToken: '', businessName: '' });
@@ -354,14 +355,20 @@ function App() {
   };
   const activeName = selectedConversation?.contact?.name || selectedConversation?.conversation?.name || selectedConversation?.conversation?.phone || 'Lead';
   const activePhone = selectedConversation?.conversation?.phone || '';
+  const phoneLabel = (id) => {
+    if (!id) return 'Sem canal';
+    const phone = phoneNumbers.find((row) => (row.phoneNumberId || row.id) === id);
+    return phone?.verifiedName || phone?.displayPhoneNumber || id;
+  };
   const filteredInbox = inbox.filter((conversation) => {
     const query = inboxSearch.trim().toLowerCase();
-    const haystack = `${conversation.name || ''} ${conversation.phone || ''} ${messagePreview(conversation.lastMessage)}`.toLowerCase();
+    const haystack = `${conversation.name || ''} ${conversation.phone || ''} ${phoneLabel(conversation.phoneNumberId)} ${messagePreview(conversation.lastMessage)}`.toLowerCase();
     const matchesSearch = !query || haystack.includes(query);
     const matchesFilter = inboxFilter === 'all'
       || (inboxFilter === 'unread' && Number(conversation.unread || 0) > 0)
       || (inboxFilter === 'open' && isWindowOpen(conversation));
-    return matchesSearch && matchesFilter;
+    const matchesPhone = !inboxPhoneFilter || conversation.phoneNumberId === inboxPhoneFilter;
+    return matchesSearch && matchesFilter && matchesPhone;
   });
 
   const saveMeta = async () => {
@@ -652,6 +659,7 @@ function App() {
         text: item.text,
         mediaUrl: item.mediaUrl,
         caption: item.caption,
+        phoneNumberId: selectedConversation.conversation.phoneNumberId || undefined,
         delaySeconds: item.delaySeconds || 0,
       })),
     });
@@ -972,6 +980,15 @@ function App() {
                 <button className={inboxFilter === 'unread' ? 'active' : ''} onClick={() => setInboxFilter('unread')}>Não lidas</button>
                 <button className={inboxFilter === 'open' ? 'active' : ''} onClick={() => setInboxFilter('open')}>Janela aberta</button>
               </div>
+              <Field label="Canal">
+                <select value={inboxPhoneFilter} onChange={(e) => setInboxPhoneFilter(e.target.value)}>
+                  <option value="">Todos os números</option>
+                  {phoneNumbers.map((phone) => {
+                    const id = phone.phoneNumberId || phone.id;
+                    return <option key={id} value={id}>{phone.verifiedName || phone.displayPhoneNumber || id}</option>;
+                  })}
+                </select>
+              </Field>
             </div>
             <div className="inbox-list">
               {filteredInbox.length === 0 ? <p className="muted">Nenhuma conversa encontrada.</p> : filteredInbox.map((conversation) => (
@@ -983,6 +1000,7 @@ function App() {
                   <div className="conversation-preview">
                     <div><b>{conversation.name || conversation.phone}</b><time>{formatTime(conversation.lastMessageAt || conversation.lastMessage?.createdAt)}</time></div>
                     <div><span>{messagePreview(conversation.lastMessage)}</span>{Number(conversation.unread || 0) > 0 && <em>{conversation.unread}</em>}</div>
+                    <small>{phoneLabel(conversation.phoneNumberId)}</small>
                   </div>
                 </button>
               ))}
@@ -996,7 +1014,7 @@ function App() {
                   <div className="conversation-avatar large"><span>{initials(activeName)}</span><i className="online" /></div>
                   <div>
                     <b>{activeName}</b>
-                    <span>{activePhone} <i /> online</span>
+                    <span>{activePhone} <i /> {phoneLabel(selectedConversation.conversation.phoneNumberId)}</span>
                   </div>
                 </div>
                 <div className="thread-tools">
