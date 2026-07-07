@@ -173,6 +173,8 @@ function App() {
   const [meta, setMeta] = useState({ appId: '', appSecret: '', wabaId: '', phoneNumberId: '', accessToken: '', businessName: '' });
   const [contact, setContact] = useState({ name: '', phone: '', tags: '', lists: '', customFields: '' });
   const [newPhone, setNewPhone] = useState({ phoneNumberId: '', displayPhoneNumber: '', verifiedName: '' });
+  const [registeringPhone, setRegisteringPhone] = useState(null);
+  const [registrationPin, setRegistrationPin] = useState('');
   const [newListName, setNewListName] = useState('');
   const [newField, setNewField] = useState({ key: '', label: '', type: 'text' });
   const [csvFile, setCsvFile] = useState(null);
@@ -410,6 +412,30 @@ function App() {
     await http.post(`/phone-numbers/${id}/refresh`);
     notify('Dados do número atualizados');
     load();
+  };
+
+  const startPhoneRegistration = (phone) => {
+    setRegisteringPhone(phone);
+    setRegistrationPin('');
+  };
+
+  const registerPhone = async () => {
+    const phoneId = registeringPhone?.phoneNumberId || registeringPhone?.id;
+    if (!phoneId) return;
+    if (!registrationPin.trim()) {
+      notify('Informe a senha/PIN do número');
+      return;
+    }
+    try {
+      await http.post(`/phone-numbers/${phoneId}/register`, { pin: registrationPin.trim() });
+      notify('Número registrado na Meta');
+      setRegisteringPhone(null);
+      setRegistrationPin('');
+      load();
+    } catch (error) {
+      notify(`Falha ao registrar: ${compactError(error?.response?.data) || error.message}`);
+      load();
+    }
   };
 
   const deletePhone = async (id) => {
@@ -706,19 +732,47 @@ function App() {
             </div>
             <div className="table">
               {phoneNumbers.length === 0 ? <p className="muted">Nenhum número sincronizado ainda.</p> : phoneNumbers.map((phone) => (
-                <div className="row" key={phone.phoneNumberId || phone.id}>
+                <div className="row phone-row" key={phone.phoneNumberId || phone.id}>
                   <b>{phone.displayPhoneNumber || phone.phoneNumberId || phone.id}</b>
                   <span>{phone.verifiedName || 'sem nome verificado'}</span>
                   <span className={`quality-badge ${qualityClass(phone.qualityRating)}`}>Qualidade: {phone.qualityRating || 'UNKNOWN'}</span>
                   <span>Limite: {phone.messagingLimitTier || 'UNKNOWN'}</span>
+                  <span className={`quality-badge ${phone.registrationStatus === 'registered' ? 'good' : phone.registrationStatus === 'failed' ? 'danger' : 'neutral'}`}>
+                    Registro: {phone.registrationStatus === 'registered' ? 'registrado' : phone.registrationStatus === 'failed' ? 'falhou' : phone.codeVerificationStatus || 'pendente'}
+                  </span>
                   <div className="row-actions">
                     <Button variant={phone.active ? 'primary' : 'secondary'} onClick={() => activatePhone(phone.phoneNumberId || phone.id)}>{phone.active ? 'Ativo' : 'Ativar'}</Button>
+                    <Button variant="secondary" onClick={() => startPhoneRegistration(phone)}>Registrar</Button>
                     <Button variant="secondary" onClick={() => refreshPhone(phone.phoneNumberId || phone.id)}>Atualizar</Button>
                     <Button variant="secondary" onClick={() => deletePhone(phone.phoneNumberId || phone.id)}>Remover</Button>
                   </div>
                 </div>
               ))}
             </div>
+            {registeringPhone && (
+              <div className="register-number-panel">
+                <div>
+                  <h4>Registrar número</h4>
+                  <p>
+                    {registeringPhone.displayPhoneNumber || registeringPhone.phoneNumberId || registeringPhone.id}
+                    {registeringPhone.lastRegistrationErrorText ? <small>Última falha: {registeringPhone.lastRegistrationErrorText}</small> : null}
+                  </p>
+                </div>
+                <Field label="Senha/PIN da conta">
+                  <input
+                    type="password"
+                    value={registrationPin}
+                    onChange={(e) => setRegistrationPin(e.target.value)}
+                    placeholder="PIN de verificação em duas etapas"
+                    autoFocus
+                  />
+                </Field>
+                <div className="row-actions">
+                  <Button variant="secondary" onClick={() => { setRegisteringPhone(null); setRegistrationPin(''); }}>Cancelar</Button>
+                  <Button disabled={!registrationPin.trim()} onClick={registerPhone}>Registrar na Meta</Button>
+                </div>
+              </div>
+            )}
           </div>
         </section>}
 

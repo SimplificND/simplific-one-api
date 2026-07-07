@@ -147,6 +147,10 @@ class PhoneNumberManualIn(BaseModel):
     messagingLimitTier: Optional[str] = None
 
 
+class PhoneNumberRegisterIn(BaseModel):
+    pin: str = Field(min_length=4, max_length=64)
+
+
 class TemplateIn(BaseModel):
     name: str
     language: str = "pt_BR"
@@ -1066,6 +1070,61 @@ async def refresh_phone_number(phone_number_id: str) -> dict[str, Any]:
     })
     await store.write(data)
     return existing
+
+
+@app.post("/api/phone-numbers/{phone_number_id}/register")
+async def register_phone_number(phone_number_id: str, body: PhoneNumberRegisterIn) -> dict[str, Any]:
+    cfg = meta_config()
+    if not cfg["accessToken"]:
+        raise HTTPException(400, "Configure Access Token para registrar o número.")
+    pin = (body.pin or "").strip()
+    if not pin:
+        raise HTTPException(400, "Informe a senha/PIN do número.")
+
+    url = f"https://graph.facebook.com/{META_GRAPH_VERSION}/{phone_number_id}/register"
+    payload = {"messaging_product": "whatsapp", "pin": pin}
+    async with httpx.AsyncClient(timeout=45) as client:
+        res = await client.post(url, json=payload, headers={"Authorization": f"Bearer {cfg['accessToken']}"})
+
+    response_payload: Any
+    if res.headers.get("content-type", "").startswith("application/json"):
+        response_payload = res.json()
+    else:
+        response_payload = res.text
+
+    data = store.read()
+    existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == phone_number_id), None)
+    if not existing:
+        existing = {
+            "id": phone_number_id,
+            "phoneNumberId": phone_number_id,
+            "active": data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id,
+            "source": "meta",
+            "createdAt": now_iso(),
+        }
+        data["phoneNumbers"].append(existing)
+
+    if res.status_code >= 400:
+        existing.update({
+            "registrationStatus": "failed",
+            "registered": False,
+            "lastRegistrationError": response_payload,
+            "lastRegistrationErrorText": readable_error(response_payload) or str(response_payload),
+            "lastRegistrationErrorAt": now_iso(),
+        })
+        await store.write(data)
+        raise HTTPException(res.status_code, response_payload)
+
+    existing.update({
+        "registrationStatus": "registered",
+        "registered": True,
+        "registeredAt": now_iso(),
+        "lastRegistrationResponse": response_payload,
+        "lastRegistrationError": None,
+        "lastRegistrationErrorText": None,
+    })
+    await store.write(data)
+    return {"registered": True, "phoneNumber": existing, "response": response_payload}
 
 
 @app.post("/api/phone-numbers/{phone_number_id}/activate")

@@ -558,6 +558,10 @@ li {
   padding: 10px;
 }
 
+.phone-row {
+  grid-template-columns: minmax(150px, 1.1fr) minmax(150px, 1.3fr) minmax(130px, auto) minmax(120px, auto) minmax(130px, auto) minmax(260px, auto);
+}
+
 .sequence-item span,
 .row span {
   color: var(--muted);
@@ -598,6 +602,36 @@ li {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.register-number-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(240px, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.register-number-panel h4 {
+  margin: 0 0 6px;
+  font-family: "Newsreader", Georgia, serif;
+  font-size: 22px;
+}
+
+.register-number-panel p {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  color: var(--muted);
+}
+
+.register-number-panel small {
+  color: var(--danger);
+  white-space: normal;
 }
 
 .check-list {
@@ -1496,6 +1530,11 @@ li {
   .grid,
   .mini-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .phone-row,
+  .register-number-panel {
+    grid-template-columns: 1fr;
   }
 
   .panel.inbox-panel {
