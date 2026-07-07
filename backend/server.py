@@ -204,6 +204,8 @@ class FlowIn(BaseModel):
     triggerValue: Optional[str] = None
     enabled: bool = True
     actions: list[FlowAction] = []
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
     phoneNumberId: Optional[str] = None
 
 

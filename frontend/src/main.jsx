@@ -1,6 +1,18 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import axios from 'axios';
+import {
+  Background,
+  Controls,
+  Handle,
+  MiniMap,
+  Position,
+  ReactFlow,
+  addEdge,
+  useEdgesState,
+  useNodesState,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import {
   ChatCircleText,
   CheckCircle,
@@ -19,6 +31,7 @@ import {
   Paperclip,
   Plus,
   Robot,
+  Trash,
   Smiley,
   Stack,
   Sun,
@@ -139,6 +152,254 @@ function SequenceEditor({ items, setItems, notify }) {
   );
 }
 
+const FLOW_NODE_OPTIONS = [
+  ['send_message', 'Texto'],
+  ['image', 'Imagem'],
+  ['video', 'Video'],
+  ['audio', 'Audio'],
+  ['document', 'Arquivo'],
+  ['delay', 'Atraso'],
+  ['add_tags', 'Tag'],
+  ['add_lists', 'Lista'],
+  ['end', 'Fim'],
+];
+
+const FLOW_NODE_LABELS = {
+  start: 'Inicio',
+  send_message: 'Mensagem',
+  image: 'Imagem',
+  video: 'Video',
+  audio: 'Audio',
+  document: 'Arquivo',
+  delay: 'Atraso',
+  add_tags: 'Adicionar tags',
+  add_lists: 'Adicionar listas',
+  end: 'Fim',
+};
+
+const defaultFlowNodes = () => ([
+  {
+    id: 'start',
+    type: 'flowNode',
+    position: { x: 80, y: 140 },
+    data: { kind: 'start', label: 'Inicio', config: {} },
+  },
+]);
+
+const actionToNode = (action, index) => ({
+  id: `node_${Date.now()}_${index}`,
+  type: 'flowNode',
+  position: { x: 360 + index * 250, y: 140 },
+  data: {
+    kind: action.type || 'send_message',
+    label: FLOW_NODE_LABELS[action.type] || action.type,
+    config: {
+      text: action.text || '',
+      mediaUrl: action.mediaUrl || '',
+      caption: action.caption || '',
+      delaySeconds: action.delaySeconds || 0,
+      tagsText: (action.tags || []).join(', '),
+      listsText: (action.lists || []).join(', '),
+    },
+  },
+});
+
+const actionsToGraph = (actions = []) => {
+  const nodes = defaultFlowNodes();
+  const edges = [];
+  let previous = 'start';
+  actions.forEach((action, index) => {
+    const node = actionToNode(action, index);
+    nodes.push(node);
+    edges.push({ id: `edge_${previous}_${node.id}`, source: previous, target: node.id, animated: true });
+    previous = node.id;
+  });
+  return { nodes, edges };
+};
+
+const graphToActions = (nodes = [], edges = []) => {
+  const byId = Object.fromEntries(nodes.map((node) => [node.id, node]));
+  const actions = [];
+  const visited = new Set();
+  let current = 'start';
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const nextEdge = edges.find((edge) => edge.source === current);
+    if (!nextEdge) break;
+    const node = byId[nextEdge.target];
+    if (!node) break;
+    const kind = node.data?.kind;
+    const config = node.data?.config || {};
+    if (kind && !['start', 'end'].includes(kind)) {
+      const action = {
+        type: kind,
+        text: config.text || '',
+        mediaUrl: config.mediaUrl || '',
+        caption: config.caption || '',
+        delaySeconds: Number(config.delaySeconds || 0),
+        tags: [],
+        lists: [],
+      };
+      if (kind === 'add_tags') action.tags = String(config.tagsText || '').split(',').map((item) => item.trim()).filter(Boolean);
+      if (kind === 'add_lists') action.lists = String(config.listsText || '').split(',').map((item) => item.trim()).filter(Boolean);
+      actions.push(action);
+    }
+    current = node.id;
+  }
+  return actions;
+};
+
+function FlowNode({ data }) {
+  return (
+    <div className={`flow-node flow-node-${data.kind}`}>
+      {data.kind !== 'start' && <Handle type="target" position={Position.Left} />}
+      <b>{data.label}</b>
+      <span>{data.preview || data.config?.text || data.config?.caption || data.config?.mediaUrl || data.config?.tagsText || data.config?.listsText || `${data.config?.delaySeconds || 0}s`}</span>
+      {data.kind !== 'end' && <Handle type="source" position={Position.Right} />}
+    </div>
+  );
+}
+
+const nodeTypes = { flowNode: FlowNode };
+
+function FlowCanvasEditor({ actions, setActions, graph, setGraph, notify }) {
+  const initialGraph = graph?.nodes?.length ? graph : actionsToGraph(actions);
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialGraph.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(initialGraph.edges);
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const selectedNode = nodes.find((node) => node.id === selectedNodeId);
+
+  useEffect(() => {
+    const linearActions = graphToActions(nodes, edges);
+    setActions(linearActions);
+    setGraph({ nodes, edges });
+  }, [nodes, edges, setActions, setGraph]);
+
+  const onConnect = useCallback((connection) => {
+    setEdges((current) => addEdge({ ...connection, animated: true }, current));
+  }, [setEdges]);
+
+  const updateSelectedConfig = (patch) => {
+    if (!selectedNode) return;
+    setNodes((current) => current.map((node) => (
+      node.id === selectedNode.id
+        ? { ...node, data: { ...node.data, config: { ...(node.data.config || {}), ...patch } } }
+        : node
+    )));
+  };
+
+  const addNode = (kind) => {
+    const nodeId = `node_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`;
+    const node = {
+      id: nodeId,
+      type: 'flowNode',
+      position: { x: 330 + nodes.length * 28, y: 110 + nodes.length * 24 },
+      data: {
+        kind,
+        label: FLOW_NODE_LABELS[kind] || kind,
+        config: { text: '', mediaUrl: '', caption: '', delaySeconds: kind === 'delay' ? 60 : 0, tagsText: '', listsText: '' },
+      },
+    };
+    setNodes((current) => [...current, node]);
+    setSelectedNodeId(nodeId);
+  };
+
+  const deleteSelected = () => {
+    if (!selectedNode || selectedNode.id === 'start') return;
+    setNodes((current) => current.filter((node) => node.id !== selectedNode.id));
+    setEdges((current) => current.filter((edge) => edge.source !== selectedNode.id && edge.target !== selectedNode.id));
+    setSelectedNodeId(null);
+  };
+
+  const upload = async (file) => {
+    if (!file || !selectedNode) return;
+    const form = new FormData();
+    form.append('file', file);
+    const { data } = await http.post('/media', form);
+    updateSelectedConfig({ mediaUrl: data.url });
+    notify?.('Midia carregada no bloco');
+  };
+
+  return (
+    <div className="flow-builder">
+      <div className="flow-toolbar">
+        {FLOW_NODE_OPTIONS.map(([kind, label]) => (
+          <button type="button" key={kind} onClick={() => addNode(kind)}>
+            <Plus size={13} /> {label}
+          </button>
+        ))}
+      </div>
+      <div className="flow-workbench">
+        <div className="flow-canvas">
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            fitView
+          >
+            <MiniMap pannable zoomable />
+            <Controls />
+            <Background gap={22} />
+          </ReactFlow>
+        </div>
+        <aside className="flow-inspector">
+          {!selectedNode ? (
+            <p className="muted">Selecione um bloco para editar. Arraste os blocos e conecte as setas para definir a sequência.</p>
+          ) : (
+            <>
+              <div className="flow-inspector-head">
+                <div>
+                  <span>Bloco</span>
+                  <b>{selectedNode.data.label}</b>
+                </div>
+                {selectedNode.id !== 'start' && <button type="button" onClick={deleteSelected}><Trash size={15} /></button>}
+              </div>
+              {selectedNode.data.kind === 'send_message' && (
+                <Field label="Mensagem">
+                  <textarea value={selectedNode.data.config?.text || ''} onChange={(e) => updateSelectedConfig({ text: e.target.value })} />
+                </Field>
+              )}
+              {['image', 'video', 'audio', 'document'].includes(selectedNode.data.kind) && (
+                <>
+                  <Field label="Arquivo">
+                    <input type="file" onChange={(e) => upload(e.target.files?.[0])} />
+                  </Field>
+                  <Field label="URL da mídia">
+                    <input value={selectedNode.data.config?.mediaUrl || ''} onChange={(e) => updateSelectedConfig({ mediaUrl: e.target.value })} placeholder="https://..." />
+                  </Field>
+                  <Field label="Legenda">
+                    <textarea value={selectedNode.data.config?.caption || ''} onChange={(e) => updateSelectedConfig({ caption: e.target.value })} />
+                  </Field>
+                </>
+              )}
+              {selectedNode.data.kind === 'delay' && (
+                <Field label="Atraso em segundos">
+                  <input type="number" min="0" value={selectedNode.data.config?.delaySeconds || 0} onChange={(e) => updateSelectedConfig({ delaySeconds: e.target.value })} />
+                </Field>
+              )}
+              {selectedNode.data.kind === 'add_tags' && (
+                <Field label="Tags separadas por vírgula">
+                  <input value={selectedNode.data.config?.tagsText || ''} onChange={(e) => updateSelectedConfig({ tagsText: e.target.value })} />
+                </Field>
+              )}
+              {selectedNode.data.kind === 'add_lists' && (
+                <Field label="Listas separadas por vírgula">
+                  <input value={selectedNode.data.config?.listsText || ''} onChange={(e) => updateSelectedConfig({ listsText: e.target.value })} />
+                </Field>
+              )}
+              <small className="muted">{actions.length} ações executáveis na sequência atual.</small>
+            </>
+          )}
+        </aside>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState('overview');
   const [theme, setTheme] = useState(() => {
@@ -190,6 +451,8 @@ function App() {
   const [csvTags, setCsvTags] = useState('');
   const [flow, setFlow] = useState({ name: '', triggerValue: '' });
   const [flowActions, setFlowActions] = useState([]);
+  const [flowGraph, setFlowGraph] = useState(() => actionsToGraph([]));
+  const [flowEditorKey, setFlowEditorKey] = useState(0);
   const [send, setSend] = useState({ name: '', listIds: [], templateName: '', language: 'pt_BR', responseFlowId: '', exclusionListIds: [], scheduledAt: '', sendNow: true, buttonFlowMap: {}, parameterMap: {}, phoneNumberId: '' });
   const [replyItems, setReplyItems] = useState([]);
   const [metaHydrated, setMetaHydrated] = useState(false);
@@ -598,9 +861,11 @@ function App() {
   };
 
   const createFlow = async () => {
-    await http.post('/flows', { ...flow, actions: flowActions, enabled: true, phoneNumberId: workspacePhoneId || null });
+    await http.post('/flows', { ...flow, actions: flowActions, nodes: flowGraph.nodes, edges: flowGraph.edges, enabled: true, phoneNumberId: workspacePhoneId || null });
     setFlow({ name: '', triggerValue: '' });
     setFlowActions([]);
+    setFlowGraph(actionsToGraph([]));
+    setFlowEditorKey((current) => current + 1);
     notify('Fluxo salvo');
     load();
   };
@@ -1009,9 +1274,9 @@ function App() {
         {tab === 'flows' && <section className="panel stack">
           <h2>Construção de fluxo</h2>
           <div className="form-row"><Field label="Nome do fluxo"><input value={flow.name} onChange={(e) => setFlow({ ...flow, name: e.target.value })} /></Field><Field label="Botão/gatilho esperado"><input value={flow.triggerValue} onChange={(e) => setFlow({ ...flow, triggerValue: e.target.value })} /></Field></div>
-          <SequenceEditor items={flowActions} setItems={setFlowActions} notify={notify} />
+          <FlowCanvasEditor key={flowEditorKey} actions={flowActions} setActions={setFlowActions} graph={flowGraph} setGraph={setFlowGraph} notify={notify} />
           <Button onClick={createFlow} disabled={!flow.name}>Salvar fluxo</Button>
-          <div className="table">{flows.map((f) => <div className="row" key={f.id}><b>{f.name}</b><span>{f.triggerValue || '-'}</span><span>{(f.actions || []).length} ações</span><span>{f.enabled ? 'ativo' : 'pausado'}</span></div>)}</div>
+          <div className="table">{flows.map((f) => <div className="row" key={f.id}><b>{f.name}</b><span>{f.triggerValue || '-'}</span><span>{(f.nodes || []).length || (f.actions || []).length} blocos</span><span>{f.enabled ? 'ativo' : 'pausado'}</span></div>)}</div>
         </section>}
 
         {tab === 'inbox' && <section className="inbox-panel">

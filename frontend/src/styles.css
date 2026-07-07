@@ -604,6 +604,138 @@ li {
   cursor: pointer;
 }
 
+.flow-builder {
+  display: grid;
+  gap: 14px;
+}
+
+.flow-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.flow-toolbar button,
+.flow-inspector-head button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.flow-toolbar button {
+  padding: 0 12px;
+}
+
+.flow-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 14px;
+  min-height: 560px;
+}
+
+.flow-canvas,
+.flow-inspector {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  overflow: hidden;
+}
+
+.flow-canvas {
+  min-height: 560px;
+}
+
+.flow-inspector {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 16px;
+}
+
+.flow-inspector-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.flow-inspector-head span {
+  display: block;
+  color: var(--faint);
+  font-family: "Spline Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.flow-inspector-head b {
+  display: block;
+  margin-top: 4px;
+}
+
+.flow-inspector-head button {
+  width: 36px;
+  color: var(--danger);
+}
+
+.flow-node {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  min-width: 170px;
+  max-width: 220px;
+  border: 1px solid rgba(var(--accent-rgb), 0.34);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 14px;
+  box-shadow: var(--shadow);
+}
+
+.flow-node b {
+  font-size: 14px;
+}
+
+.flow-node span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-node-start {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.flow-node-end {
+  border-color: rgba(182, 71, 71, 0.34);
+}
+
+.react-flow__handle {
+  width: 10px;
+  height: 10px;
+  border-color: var(--surface);
+  background: var(--accent);
+}
+
+.react-flow__controls,
+.react-flow__minimap {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
 .table {
   display: grid;
   margin-top: 12px;
@@ -1571,6 +1703,7 @@ li {
   }
 
   .phone-row,
+  .flow-workbench,
   .register-number-panel {
     grid-template-columns: 1fr;
   }
@@ -1613,9 +1746,18 @@ li {
   .two-col.wide-left,
   .form-row,
   .composer-grid,
+  .header-tools,
   .sequence-item,
   .row,
   .lead-card {
     grid-template-columns: 1fr;
+  }
+
+  .flow-canvas {
+    min-height: 460px;
+  }
+
+  .header-tools {
+    flex-direction: column;
   }
 }
