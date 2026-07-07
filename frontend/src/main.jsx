@@ -983,7 +983,7 @@ function App() {
         </div>
         <nav>{nav.map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={16} /> {label}</button>)}</nav>
       </aside>
-      <section className={tab === 'inbox' ? 'content content-inbox' : 'content'}>
+      <section className={tab === 'inbox' ? 'content content-inbox' : tab === 'flows' ? 'content content-flows' : 'content'}>
         <header>
           <div>
             <p>// MOTOR OFICIAL WHATSAPP</p>
@@ -1271,7 +1271,7 @@ function App() {
           </div>
         </section>}
 
-        {tab === 'flows' && <section className="panel stack">
+        {tab === 'flows' && <section className="panel stack flow-panel">
           <h2>Construção de fluxo</h2>
           <div className="form-row"><Field label="Nome do fluxo"><input value={flow.name} onChange={(e) => setFlow({ ...flow, name: e.target.value })} /></Field><Field label="Botão/gatilho esperado"><input value={flow.triggerValue} onChange={(e) => setFlow({ ...flow, triggerValue: e.target.value })} /></Field></div>
           <FlowCanvasEditor key={flowEditorKey} actions={flowActions} setActions={setFlowActions} graph={flowGraph} setGraph={setFlowGraph} notify={notify} />

@@ -213,19 +213,29 @@ nav button.active {
   padding: 22px 32px 32px;
 }
 
-.content-inbox header {
+.content.content-flows {
+  width: 100%;
+  max-width: none;
+  padding: 22px 32px 32px;
+}
+
+.content-inbox header,
+.content-flows header {
   margin-bottom: 16px;
 }
 
-.content-inbox h1 {
+.content-inbox h1,
+.content-flows h1 {
   font-size: clamp(30px, 3vw, 42px);
 }
 
-.content-inbox header small {
+.content-inbox header small,
+.content-flows header small {
   display: none;
 }
 
-.content-inbox .status-row {
+.content-inbox .status-row,
+.content-flows .status-row {
   margin-top: 12px;
 }
 
@@ -421,6 +431,15 @@ h3 {
   grid-template-columns: 1fr;
 }
 
+.flow-panel {
+  min-height: calc(100vh - 156px);
+  padding: 26px;
+}
+
+.flow-panel .form-row {
+  grid-template-columns: minmax(260px, 420px) minmax(260px, 420px);
+}
+
 .panel.inbox-panel {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr) 320px;
@@ -607,6 +626,7 @@ li {
 .flow-builder {
   display: grid;
   gap: 14px;
+  min-height: calc(100vh - 342px);
 }
 
 .flow-toolbar {
@@ -636,9 +656,9 @@ li {
 
 .flow-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 400px);
   gap: 14px;
-  min-height: 560px;
+  min-height: calc(100vh - 400px);
 }
 
 .flow-canvas,
@@ -650,7 +670,7 @@ li {
 }
 
 .flow-canvas {
-  min-height: 560px;
+  min-height: calc(100vh - 400px);
 }
 
 .flow-inspector {
