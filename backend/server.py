@@ -1031,6 +1031,46 @@ async def sync_meta_templates() -> dict[str, Any]:
     return {"count": len(synced), "templates": synced}
 
 
+@app.get("/api/meta/subscribed-apps")
+async def subscribed_apps() -> dict[str, Any]:
+    cfg = meta_config()
+    if not cfg["accessToken"] or not cfg["wabaId"]:
+        raise HTTPException(400, "Configure WABA ID e Access Token para verificar o webhook.")
+    url = f"https://graph.facebook.com/{META_GRAPH_VERSION}/{cfg['wabaId']}/subscribed_apps"
+    async with httpx.AsyncClient(timeout=45) as client:
+        res = await client.get(url, headers={"Authorization": f"Bearer {cfg['accessToken']}"})
+    if res.status_code >= 400:
+        raise HTTPException(res.status_code, res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text)
+    payload = res.json()
+    return {"subscribed": bool(payload.get("data")), "apps": payload.get("data") or []}
+
+
+@app.post("/api/meta/subscribe-webhook")
+async def subscribe_webhook() -> dict[str, Any]:
+    cfg = meta_config()
+    if not cfg["accessToken"] or not cfg["wabaId"]:
+        raise HTTPException(400, "Configure WABA ID e Access Token para ativar o webhook.")
+    url = f"https://graph.facebook.com/{META_GRAPH_VERSION}/{cfg['wabaId']}/subscribed_apps"
+    async with httpx.AsyncClient(timeout=45) as client:
+        res = await client.post(url, headers={"Authorization": f"Bearer {cfg['accessToken']}"})
+    response_payload: Any = res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text
+    data = store.read()
+    meta = data.setdefault("settings", {}).setdefault("meta", {})
+    if res.status_code >= 400:
+        meta["webhookSubscribed"] = False
+        meta["lastWebhookSubscribeError"] = response_payload
+        meta["lastWebhookSubscribeErrorText"] = readable_error(response_payload) or str(response_payload)
+        meta["lastWebhookSubscribeErrorAt"] = now_iso()
+        await store.write(data)
+        raise HTTPException(res.status_code, response_payload)
+    meta["webhookSubscribed"] = True
+    meta["webhookSubscribedAt"] = now_iso()
+    meta["lastWebhookSubscribeError"] = None
+    meta["lastWebhookSubscribeErrorText"] = None
+    await store.write(data)
+    return {"subscribed": True, "response": response_payload}
+
+
 @app.get("/api/phone-numbers")
 async def list_phone_numbers() -> list[dict[str, Any]]:
     data = store.read()

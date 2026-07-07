@@ -402,6 +402,12 @@ function App() {
     load();
   };
 
+  const subscribeWebhook = async () => {
+    await http.post('/meta/subscribe-webhook');
+    notify('Webhook ativado para o WABA atual');
+    load();
+  };
+
   const addPhoneNumber = async () => {
     await http.post('/phone-numbers', newPhone);
     setNewPhone({ phoneNumberId: '', displayPhoneNumber: '', verifiedName: '' });
@@ -717,7 +723,7 @@ function App() {
             <Field label="Phone Number ID"><input value={meta.phoneNumberId || ''} onChange={(e) => updateMeta('phoneNumberId', e.target.value)} /></Field>
             <Field label="Access Token"><input value={meta.accessToken || ''} onChange={(e) => updateMeta('accessToken', e.target.value)} placeholder={settings.meta?.accessTokenPreview || ''} /></Field>
           </div>
-          <div className="inline-actions"><Button onClick={saveMeta}>Salvar conexão</Button><Button variant="secondary" onClick={syncPhoneNumbers}>Sincronizar números</Button><Button variant="secondary" onClick={syncTemplates}>Sincronizar modelos</Button></div>
+          <div className="inline-actions"><Button onClick={saveMeta}>Salvar conexão</Button><Button variant="secondary" onClick={syncPhoneNumbers}>Sincronizar números</Button><Button variant="secondary" onClick={syncTemplates}>Sincronizar modelos</Button><Button variant="secondary" onClick={subscribeWebhook}>Ativar webhook</Button></div>
           <div className="copy-grid">
             <div className="notice">
               <span>Callback URL</span>
