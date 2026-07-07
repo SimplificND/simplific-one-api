@@ -772,6 +772,46 @@ def extract_webhook_statuses(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return statuses
 
 
+def summarize_webhook_event(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload") or {}
+    phone_numbers: list[str] = []
+    display_numbers: list[str] = []
+    fields: list[str] = []
+    sample_messages: list[dict[str, Any]] = []
+    for entry in payload.get("entry", []) or []:
+        for change in entry.get("changes", []) or []:
+            value = change.get("value") or {}
+            field = change.get("field")
+            if field:
+                fields.append(field)
+            metadata = value.get("metadata") or {}
+            phone_id = metadata.get("phone_number_id")
+            display_phone = metadata.get("display_phone_number")
+            if phone_id and phone_id not in phone_numbers:
+                phone_numbers.append(phone_id)
+            if display_phone and display_phone not in display_numbers:
+                display_numbers.append(display_phone)
+            for raw in value.get("messages", []) or []:
+                sample_messages.append({
+                    "from": raw.get("from"),
+                    "type": raw.get("type"),
+                    "text": (raw.get("text") or {}).get("body"),
+                    "id": raw.get("id"),
+                })
+    inbound_messages = extract_webhook_messages(payload)
+    delivery_statuses = extract_webhook_statuses(payload)
+    return {
+        "id": event.get("id"),
+        "createdAt": event.get("createdAt"),
+        "fields": fields,
+        "phoneNumberIds": phone_numbers,
+        "displayPhoneNumbers": display_numbers,
+        "messages": len(inbound_messages),
+        "statuses": len(delivery_statuses),
+        "sampleMessages": sample_messages[:3],
+    }
+
+
 def update_campaign_delivery_from_status(data: dict[str, Any], status: dict[str, Any]) -> None:
     provider_id = status.get("providerMessageId")
     status_name = status.get("status")
@@ -864,6 +904,16 @@ async def dashboard() -> dict[str, Any]:
         "automationRuns": len(data["automationRuns"]),
         "messagesSent": sent,
         "messagesFailed": failed,
+    }
+
+
+@app.get("/api/meta/webhooks/recent")
+async def recent_webhooks(limit: int = 25) -> dict[str, Any]:
+    data = store.read()
+    events = list(reversed(data.get("webhookEvents", [])))[:max(1, min(limit, 100))]
+    return {
+        "count": len(events),
+        "events": [summarize_webhook_event(event) for event in events],
     }
 
 
