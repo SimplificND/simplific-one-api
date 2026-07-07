@@ -295,6 +295,32 @@ h3 {
   box-shadow: var(--shadow);
 }
 
+.header-tools {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.workspace-select {
+  display: grid;
+  gap: 6px;
+}
+
+.workspace-select span {
+  color: var(--faint);
+  font-family: "Spline Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.workspace-select select {
+  min-width: 230px;
+  min-height: 38px;
+  border-radius: 8px;
+}
+
 .status-row {
   display: flex;
   flex-wrap: wrap;

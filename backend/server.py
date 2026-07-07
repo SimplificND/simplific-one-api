@@ -119,6 +119,7 @@ class LeadIn(BaseModel):
     tags: list[str] = []
     lists: list[str] = []
     customFields: dict[str, Any] = {}
+    phoneNumberId: Optional[str] = None
 
 
 class ContactUpdateIn(BaseModel):
@@ -126,17 +127,20 @@ class ContactUpdateIn(BaseModel):
     tags: list[str] = []
     lists: list[str] = []
     customFields: dict[str, Any] = {}
+    phoneNumberId: Optional[str] = None
 
 
 class NamedIn(BaseModel):
     name: str
     color: Optional[str] = None
+    phoneNumberId: Optional[str] = None
 
 
 class CustomFieldIn(BaseModel):
     key: str
     label: Optional[str] = None
     type: str = "text"
+    phoneNumberId: Optional[str] = None
 
 
 class PhoneNumberManualIn(BaseModel):
@@ -156,6 +160,7 @@ class TemplateIn(BaseModel):
     language: str = "pt_BR"
     category: str = "UTILITY"
     bodyPreview: Optional[str] = None
+    phoneNumberId: Optional[str] = None
 
 
 class MessageItem(BaseModel):
@@ -199,6 +204,7 @@ class FlowIn(BaseModel):
     triggerValue: Optional[str] = None
     enabled: bool = True
     actions: list[FlowAction] = []
+    phoneNumberId: Optional[str] = None
 
 
 class TemplateCampaignIn(BaseModel):
@@ -224,6 +230,7 @@ class AutomationIn(BaseModel):
     addTags: list[str] = []
     addLists: list[str] = []
     items: list[MessageItem] = []
+    phoneNumberId: Optional[str] = None
 
 
 def configured_meta() -> bool:
@@ -263,6 +270,31 @@ def active_phone_number_id(data: Optional[dict[str, Any]] = None, override: Opti
         return active.get("phoneNumberId") or active.get("id") or ""
     first = next(iter(data.get("phoneNumbers", [])), None)
     return (first or {}).get("phoneNumberId") or (first or {}).get("id") or ""
+
+
+def normalize_scope(phone_number_id: Optional[str]) -> str:
+    return (phone_number_id or "").strip()
+
+
+def scoped(row: dict[str, Any], phone_number_id: Optional[str]) -> bool:
+    scope = normalize_scope(phone_number_id)
+    if not scope:
+        return True
+    row_scope = row.get("phoneNumberId")
+    if row_scope:
+        return row_scope == scope
+    row_scopes = row.get("phoneNumberIds") or []
+    return scope in row_scopes
+
+
+def mark_contact_scope(contact: dict[str, Any], phone_number_id: Optional[str]) -> None:
+    scope = normalize_scope(phone_number_id)
+    if not scope:
+        return
+    scopes = set(contact.get("phoneNumberIds") or [])
+    scopes.add(scope)
+    contact["phoneNumberIds"] = sorted(scopes)
+    contact["lastPhoneNumberId"] = scope
 
 
 def extract_template_buttons(template: dict[str, Any]) -> list[dict[str, Any]]:
@@ -310,8 +342,7 @@ def upsert_contact(data: dict[str, Any], phone: str, name: Optional[str] = None,
     if contact:
         if name and not contact.get("name"):
             contact["name"] = name
-        if phone_number_id:
-            contact["lastPhoneNumberId"] = phone_number_id
+        mark_contact_scope(contact, phone_number_id)
         contact.setdefault("customFields", {})
         contact["updatedAt"] = now_iso()
         return contact
@@ -320,6 +351,7 @@ def upsert_contact(data: dict[str, Any], phone: str, name: Optional[str] = None,
         "name": name,
         "phone": normalized,
         "lastPhoneNumberId": phone_number_id,
+        "phoneNumberIds": [phone_number_id] if phone_number_id else [],
         "tags": [],
         "lists": [],
         "customFields": {},
@@ -480,9 +512,9 @@ async def send_sequence(phone: str, items: list[MessageItem], source: str = "man
     return results
 
 
-async def set_pending_response_flow(phone: str, response_flow_id: Optional[str] = None, button_flow_map: Optional[dict[str, str]] = None, campaign_id: Optional[str] = None) -> None:
+async def set_pending_response_flow(phone: str, response_flow_id: Optional[str] = None, button_flow_map: Optional[dict[str, str]] = None, campaign_id: Optional[str] = None, phone_number_id: Optional[str] = None) -> None:
     data = store.read()
-    contact = upsert_contact(data, phone)
+    contact = upsert_contact(data, phone, phone_number_id=phone_number_id)
     if button_flow_map:
         contact["pendingResponseFlows"] = button_flow_map
     elif response_flow_id:
@@ -492,26 +524,28 @@ async def set_pending_response_flow(phone: str, response_flow_id: Optional[str] 
     await store.write(data)
 
 
-def ensure_named_list(data: dict[str, Any], name: str) -> str:
+def ensure_named_list(data: dict[str, Any], name: str, phone_number_id: Optional[str] = None) -> str:
     clean = (name or "").strip()
     if not clean:
         return ""
-    existing = next((x for x in data["lists"] if x.get("name", "").lower() == clean.lower()), None)
+    scope = normalize_scope(phone_number_id)
+    existing = next((x for x in data["lists"] if x.get("name", "").lower() == clean.lower() and (x.get("phoneNumberId") or "") == scope), None)
     if existing:
         return existing["id"]
-    doc = {"id": new_id("list"), "name": clean, "createdAt": now_iso()}
+    doc = {"id": new_id("list"), "name": clean, "phoneNumberId": scope or None, "createdAt": now_iso()}
     data["lists"].append(doc)
     return doc["id"]
 
 
-def ensure_named_tag(data: dict[str, Any], name: str) -> str:
+def ensure_named_tag(data: dict[str, Any], name: str, phone_number_id: Optional[str] = None) -> str:
     clean = (name or "").strip()
     if not clean:
         return ""
-    existing = next((x for x in data["tags"] if x.get("name", "").lower() == clean.lower()), None)
+    scope = normalize_scope(phone_number_id)
+    existing = next((x for x in data["tags"] if x.get("name", "").lower() == clean.lower() and (x.get("phoneNumberId") or "") == scope), None)
     if existing:
         return existing["id"]
-    doc = {"id": new_id("tag"), "name": clean, "color": "#84ff00", "createdAt": now_iso()}
+    doc = {"id": new_id("tag"), "name": clean, "color": "#84ff00", "phoneNumberId": scope or None, "createdAt": now_iso()}
     data["tags"].append(doc)
     return doc["id"]
 
@@ -521,8 +555,9 @@ async def run_flow_for_contact(phone: str, flow_id: str, source: str = "flow") -
     flow = next((f for f in data["flows"] if f["id"] == flow_id and f.get("enabled", True)), None)
     if not flow:
         return {"skipped": True, "reason": "flow_not_found_or_disabled"}
-    contact = upsert_contact(data, phone)
-    flow_phone_number_id = contact.get("lastPhoneNumberId") or active_phone_number_id(data)
+    flow_phone_number_id = flow.get("phoneNumberId")
+    contact = upsert_contact(data, phone, phone_number_id=flow_phone_number_id)
+    flow_phone_number_id = flow_phone_number_id or contact.get("lastPhoneNumberId") or active_phone_number_id(data)
     sent_items: list[MessageItem] = []
     for action in flow.get("actions") or []:
         action_type = action.get("type")
@@ -545,6 +580,8 @@ def contacts_for_campaign(data: dict[str, Any], body: TemplateCampaignIn) -> lis
     selected = []
     excluded = set(body.exclusionListIds or [])
     for contact in data["contacts"]:
+        if body.phoneNumberId and not scoped(contact, body.phoneNumberId):
+            continue
         contact_lists = set(contact.get("lists") or [])
         contact_tags = set(contact.get("tags") or [])
         in_list = not body.listIds or bool(contact_lists & set(body.listIds))
@@ -624,11 +661,11 @@ async def execute_campaign(campaign_id: str) -> None:
             "createdAt": now_iso(),
         })
         if body.buttonFlowMap:
-            await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap, campaign_id=campaign_id)
+            await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
         elif body.responseFlowId:
-            await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId, campaign_id=campaign_id)
+            await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
         else:
-            await set_pending_response_flow(contact["phone"], campaign_id=campaign_id)
+            await set_pending_response_flow(contact["phone"], campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
 
     data = store.read()
     campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
@@ -697,7 +734,7 @@ async def run_matching_automations(phone: str, inbound: dict[str, Any]) -> None:
         await run_flow_for_contact(contact["phone"], pending_flow, source=f"button-flow:{pending_flow}")
         data = store.read()
         contact = upsert_contact(data, phone, inbound.get("name"), channel_id)
-    matches = [a for a in data["automations"] if automation_matches(a, inbound)]
+    matches = [a for a in data["automations"] if scoped(a, channel_id) and automation_matches(a, inbound)]
     for automation in matches:
         attach_labels(contact, automation.get("addTags") or [], automation.get("addLists") or [])
         data["automationRuns"].append({
@@ -889,19 +926,27 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/api/dashboard")
-async def dashboard() -> dict[str, Any]:
+async def dashboard(phoneNumberId: Optional[str] = None) -> dict[str, Any]:
     data = store.read()
-    unread = sum(1 for c in data["conversations"] if c.get("unread", 0) > 0)
-    sent = sum(1 for m in data["messages"] if m.get("direction") == "out" and m.get("status") == "sent")
-    failed = sum(1 for m in data["messages"] if m.get("direction") == "out" and m.get("status") == "failed")
+    contacts = [c for c in data["contacts"] if scoped(c, phoneNumberId)]
+    lists = [row for row in data["lists"] if scoped(row, phoneNumberId)]
+    tags = [row for row in data["tags"] if scoped(row, phoneNumberId)]
+    templates = [row for row in data["templates"] if scoped(row, phoneNumberId)]
+    campaigns = [row for row in data["campaigns"] if scoped(row, phoneNumberId)]
+    conversations = [row for row in data["conversations"] if scoped(row, phoneNumberId)]
+    messages = [row for row in data["messages"] if scoped(row, phoneNumberId)]
+    automations = [row for row in data["automationRuns"] if scoped(row, phoneNumberId)]
+    unread = sum(1 for c in conversations if c.get("unread", 0) > 0)
+    sent = sum(1 for m in messages if m.get("direction") == "out" and m.get("status") == "sent")
+    failed = sum(1 for m in messages if m.get("direction") == "out" and m.get("status") == "failed")
     return {
-        "contacts": len(data["contacts"]),
-        "lists": len(data["lists"]),
-        "tags": len(data["tags"]),
-        "templates": len(data["templates"]),
-        "campaigns": len(data["campaigns"]),
+        "contacts": len(contacts),
+        "lists": len(lists),
+        "tags": len(tags),
+        "templates": len(templates),
+        "campaigns": len(campaigns),
         "inboxUnread": unread,
-        "automationRuns": len(data["automationRuns"]),
+        "automationRuns": len(automations),
         "messagesSent": sent,
         "messagesFailed": failed,
     }
@@ -1005,19 +1050,21 @@ async def sync_meta_templates() -> dict[str, Any]:
     payload = res.json()
     data = store.read()
     synced = []
+    channel_id = active_phone_number_id(data)
     for tpl in payload.get("data", []) or []:
         body_preview = ""
         for component in tpl.get("components", []) or []:
             if component.get("type") == "BODY":
                 body_preview = component.get("text") or ""
         doc = {
-            "id": f"meta_tpl_{tpl.get('name')}_{tpl.get('language')}",
+            "id": f"meta_tpl_{channel_id or 'global'}_{tpl.get('name')}_{tpl.get('language')}",
             "name": tpl.get("name"),
             "language": tpl.get("language"),
             "status": tpl.get("status"),
             "category": tpl.get("category"),
             "bodyPreview": body_preview,
             "components": tpl.get("components") or [],
+            "phoneNumberId": channel_id or None,
             "source": "meta",
             "syncedAt": now_iso(),
         }
@@ -1272,10 +1319,12 @@ async def delete_phone_number(phone_number_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/templates")
-async def list_templates() -> list[dict[str, Any]]:
+async def list_templates(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
     data = store.read()
     rows = []
     for template in data["templates"]:
+        if not scoped(template, phoneNumberId):
+            continue
         rows.append({
             **template,
             "buttons": extract_template_buttons(template),
@@ -1339,8 +1388,9 @@ async def media_raw(media_id: str):
 
 
 @app.get("/api/contacts")
-async def list_contacts() -> list[dict[str, Any]]:
-    return sorted(store.read()["contacts"], key=lambda c: c.get("createdAt", ""), reverse=True)
+async def list_contacts(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
+    rows = [row for row in store.read()["contacts"] if scoped(row, phoneNumberId)]
+    return sorted(rows, key=lambda c: c.get("createdAt", ""), reverse=True)
 
 
 @app.get("/api/contacts/{contact_id}")
@@ -1363,6 +1413,7 @@ async def update_contact(contact_id: str, body: ContactUpdateIn) -> dict[str, An
     contact["tags"] = sorted(set(body.tags or []))
     contact["lists"] = sorted(set(body.lists or []))
     contact["customFields"] = body.customFields or {}
+    mark_contact_scope(contact, body.phoneNumberId)
     contact["updatedAt"] = now_iso()
     await store.write(data)
     return contact
@@ -1371,9 +1422,9 @@ async def update_contact(contact_id: str, body: ContactUpdateIn) -> dict[str, An
 @app.post("/api/contacts")
 async def create_contact(body: LeadIn) -> dict[str, Any]:
     data = store.read()
-    contact = upsert_contact(data, body.phone, body.name)
-    tag_ids = [ensure_named_tag(data, value) for value in body.tags]
-    list_ids = [ensure_named_list(data, value) for value in body.lists]
+    contact = upsert_contact(data, body.phone, body.name, body.phoneNumberId)
+    tag_ids = [ensure_named_tag(data, value, body.phoneNumberId) for value in body.tags]
+    list_ids = [ensure_named_list(data, value, body.phoneNumberId) for value in body.lists]
     attach_labels(contact, [x for x in tag_ids if x], [x for x in list_ids if x], body.customFields)
     await store.write(data)
     return contact
@@ -1384,9 +1435,9 @@ async def import_contacts(rows: list[LeadIn]) -> dict[str, Any]:
     data = store.read()
     count = 0
     for row in rows:
-        contact = upsert_contact(data, row.phone, row.name)
-        tag_ids = [ensure_named_tag(data, value) for value in row.tags]
-        list_ids = [ensure_named_list(data, value) for value in row.lists]
+        contact = upsert_contact(data, row.phone, row.name, row.phoneNumberId)
+        tag_ids = [ensure_named_tag(data, value, row.phoneNumberId) for value in row.tags]
+        list_ids = [ensure_named_list(data, value, row.phoneNumberId) for value in row.lists]
         attach_labels(contact, [x for x in tag_ids if x], [x for x in list_ids if x], row.customFields)
         count += 1
     await store.write(data)
@@ -1398,6 +1449,7 @@ async def import_contacts_csv(
     file: UploadFile = File(...),
     listName: Optional[str] = Form(None),
     tags: str = Form(""),
+    phoneNumberId: Optional[str] = Form(None),
 ) -> dict[str, Any]:
     raw = await file.read()
     text = raw.decode("utf-8-sig")
@@ -1405,8 +1457,8 @@ async def import_contacts_csv(
     if not reader.fieldnames:
         raise HTTPException(400, "CSV sem cabeçalho")
     data = store.read()
-    list_id = ensure_named_list(data, listName or Path(file.filename or "lista").stem)
-    tag_ids = [ensure_named_tag(data, tag.strip()) for tag in tags.split(",") if tag.strip()]
+    list_id = ensure_named_list(data, listName or Path(file.filename or "lista").stem, phoneNumberId)
+    tag_ids = [ensure_named_tag(data, tag.strip(), phoneNumberId) for tag in tags.split(",") if tag.strip()]
     imported = 0
     custom_fields = set()
     for row in reader:
@@ -1419,9 +1471,9 @@ async def import_contacts_csv(
         custom_fields.update(custom.keys())
         row_tags = [x.strip() for x in str(row.get("tags") or "").split(",") if x.strip()]
         row_lists = [x.strip() for x in str(row.get("lists") or row.get("listas") or "").split(",") if x.strip()]
-        list_ids = [list_id] + [ensure_named_list(data, x) for x in row_lists]
-        all_tag_ids = tag_ids + [ensure_named_tag(data, x) for x in row_tags]
-        contact = upsert_contact(data, phone, name)
+        list_ids = [list_id] + [ensure_named_list(data, x, phoneNumberId) for x in row_lists]
+        all_tag_ids = tag_ids + [ensure_named_tag(data, x, phoneNumberId) for x in row_tags]
+        contact = upsert_contact(data, phone, name, phoneNumberId)
         attach_labels(contact, all_tag_ids, [x for x in list_ids if x], custom)
         imported += 1
     await store.write(data)
@@ -1429,22 +1481,22 @@ async def import_contacts_csv(
 
 
 @app.get("/api/lists")
-async def list_lists() -> list[dict[str, Any]]:
-    return store.read()["lists"]
+async def list_lists(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
+    return [row for row in store.read()["lists"] if scoped(row, phoneNumberId)]
 
 
 @app.post("/api/lists")
 async def create_list(body: NamedIn) -> dict[str, Any]:
     data = store.read()
-    doc = {"id": new_id("list"), "name": body.name, "createdAt": now_iso()}
+    doc = {"id": new_id("list"), "name": body.name, "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
     data["lists"].append(doc)
     await store.write(data)
     return doc
 
 
 @app.get("/api/custom-fields")
-async def list_custom_fields() -> list[dict[str, Any]]:
-    return store.read()["customFields"]
+async def list_custom_fields(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
+    return [row for row in store.read()["customFields"] if scoped(row, phoneNumberId)]
 
 
 @app.post("/api/custom-fields")
@@ -1453,8 +1505,8 @@ async def create_custom_field(body: CustomFieldIn) -> dict[str, Any]:
     key = re.sub(r"[^a-zA-Z0-9_]+", "_", body.key.strip()).strip("_")
     if not key:
         raise HTTPException(400, "Informe uma chave válida")
-    doc = {"id": key, "key": key, "label": body.label or key, "type": body.type, "createdAt": now_iso()}
-    existing = next((f for f in data["customFields"] if f["key"] == key), None)
+    doc = {"id": f"{body.phoneNumberId or 'global'}_{key}", "key": key, "label": body.label or key, "type": body.type, "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
+    existing = next((f for f in data["customFields"] if f["key"] == key and (f.get("phoneNumberId") or "") == (body.phoneNumberId or "")), None)
     if existing:
         existing.update(doc)
     else:
@@ -1464,27 +1516,29 @@ async def create_custom_field(body: CustomFieldIn) -> dict[str, Any]:
 
 
 @app.get("/api/tags")
-async def list_tags() -> list[dict[str, Any]]:
-    return store.read()["tags"]
+async def list_tags(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
+    return [row for row in store.read()["tags"] if scoped(row, phoneNumberId)]
 
 
 @app.post("/api/tags")
 async def create_tag(body: NamedIn) -> dict[str, Any]:
     data = store.read()
-    doc = {"id": new_id("tag"), "name": body.name, "color": body.color or "#84ff00", "createdAt": now_iso()}
+    doc = {"id": new_id("tag"), "name": body.name, "color": body.color or "#84ff00", "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
     data["tags"].append(doc)
     await store.write(data)
     return doc
 
 
 @app.get("/api/inbox")
-async def inbox() -> list[dict[str, Any]]:
+async def inbox(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
     data = store.read()
     latest_by_convo = {}
     for msg in data["messages"]:
         latest_by_convo[msg["conversationId"]] = msg
     conversations = []
     for convo in data["conversations"]:
+        if not scoped(convo, phoneNumberId):
+            continue
         conversations.append({**convo, "lastMessage": latest_by_convo.get(convo["id"])})
     return sorted(conversations, key=lambda c: c.get("lastMessageAt", ""), reverse=True)
 
@@ -1532,8 +1586,8 @@ async def send_message(body: SendMessageIn) -> dict[str, Any]:
 
 
 @app.get("/api/flows")
-async def list_flows() -> list[dict[str, Any]]:
-    return store.read()["flows"]
+async def list_flows(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
+    return [row for row in store.read()["flows"] if scoped(row, phoneNumberId)]
 
 
 @app.post("/api/flows")
@@ -1567,8 +1621,8 @@ async def delete_flow(flow_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/automations")
-async def list_automations() -> list[dict[str, Any]]:
-    return store.read()["automations"]
+async def list_automations(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
+    return [row for row in store.read()["automations"] if scoped(row, phoneNumberId)]
 
 
 @app.post("/api/automations")
@@ -1602,8 +1656,9 @@ async def delete_automation(automation_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/campaigns")
-async def list_campaigns() -> list[dict[str, Any]]:
-    return sorted(store.read()["campaigns"], key=lambda c: c.get("createdAt", ""), reverse=True)
+async def list_campaigns(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
+    rows = [row for row in store.read()["campaigns"] if scoped(row, phoneNumberId)]
+    return sorted(rows, key=lambda c: c.get("createdAt", ""), reverse=True)
 
 
 @app.post("/api/campaigns/estimate")
@@ -1629,6 +1684,7 @@ async def create_campaign(body: TemplateCampaignIn, background: BackgroundTasks)
         "name": body.name,
         "templateName": body.templateName,
         "language": body.language,
+        "phoneNumberId": body.phoneNumberId,
         "responseFlowId": body.responseFlowId,
         "scheduledAt": body.scheduledAt,
         "targetCount": len(contacts),

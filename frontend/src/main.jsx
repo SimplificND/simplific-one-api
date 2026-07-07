@@ -170,6 +170,13 @@ function App() {
   const [inboxFilter, setInboxFilter] = useState('all');
   const [inboxPhoneFilter, setInboxPhoneFilter] = useState('');
   const [inboxComposerMode, setInboxComposerMode] = useState('reply');
+  const [workspacePhoneId, setWorkspacePhoneId] = useState(() => {
+    try {
+      return localStorage.getItem('s1-api-workspace') || '';
+    } catch {
+      return '';
+    }
+  });
 
   const [meta, setMeta] = useState({ appId: '', appSecret: '', wabaId: '', phoneNumberId: '', accessToken: '', businessName: '' });
   const [contact, setContact] = useState({ name: '', phone: '', tags: '', lists: '', customFields: '' });
@@ -187,6 +194,7 @@ function App() {
   const [replyItems, setReplyItems] = useState([]);
   const [metaHydrated, setMetaHydrated] = useState(false);
   const metaHydratedRef = useRef(false);
+  const workspaceHydratedRef = useRef(Boolean(workspacePhoneId));
   const inboxAttachmentRef = useRef(null);
   const inboxImageRef = useRef(null);
 
@@ -198,27 +206,46 @@ function App() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    workspaceHydratedRef.current = true;
+    try {
+      localStorage.setItem('s1-api-workspace', workspacePhoneId);
+    } catch {
+      // localStorage can be blocked in private contexts.
+    }
+    setInboxPhoneFilter(workspacePhoneId);
+    setSend((current) => ({ ...current, phoneNumberId: workspacePhoneId || '' }));
+    setSelectedConversation(null);
+  }, [workspacePhoneId]);
+
   const notify = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(''), 3500);
   };
 
   const load = async () => {
+    const scoped = workspacePhoneId ? { params: { phoneNumberId: workspacePhoneId } } : undefined;
     const [h, s, d, c, l, tagRows, fieldRows, p, t, f, camp, i] = await Promise.all([
       http.get('/health').then((r) => r.data).catch(() => ({ ok: false })),
       http.get('/settings').then((r) => r.data).catch(() => ({})),
-      http.get('/dashboard').then((r) => r.data).catch(() => ({})),
-      http.get('/contacts').then((r) => r.data).catch(() => []),
-      http.get('/lists').then((r) => r.data).catch(() => []),
-      http.get('/tags').then((r) => r.data).catch(() => []),
-      http.get('/custom-fields').then((r) => r.data).catch(() => []),
+      http.get('/dashboard', scoped).then((r) => r.data).catch(() => ({})),
+      http.get('/contacts', scoped).then((r) => r.data).catch(() => []),
+      http.get('/lists', scoped).then((r) => r.data).catch(() => []),
+      http.get('/tags', scoped).then((r) => r.data).catch(() => []),
+      http.get('/custom-fields', scoped).then((r) => r.data).catch(() => []),
       http.get('/phone-numbers').then((r) => r.data).catch(() => []),
-      http.get('/templates').then((r) => r.data).catch(() => []),
-      http.get('/flows').then((r) => r.data).catch(() => []),
-      http.get('/campaigns').then((r) => r.data).catch(() => []),
-      http.get('/inbox').then((r) => r.data).catch(() => []),
+      http.get('/templates', scoped).then((r) => r.data).catch(() => []),
+      http.get('/flows', scoped).then((r) => r.data).catch(() => []),
+      http.get('/campaigns', scoped).then((r) => r.data).catch(() => []),
+      http.get('/inbox', scoped).then((r) => r.data).catch(() => []),
     ]);
     setHealth(h); setSettings(s); setDashboard(d); setContacts(c); setLists(l); setTags(tagRows); setCustomFields(fieldRows); setPhoneNumbers(p); setTemplates(t); setFlows(f); setCampaigns(camp); setInbox(i);
+    if (!workspaceHydratedRef.current && !workspacePhoneId) {
+      const active = p.find((phone) => phone.active) || p[0];
+      const activeId = active?.phoneNumberId || active?.id || '';
+      if (activeId) setWorkspacePhoneId(activeId);
+      workspaceHydratedRef.current = true;
+    }
     if (!metaHydratedRef.current && s.meta) {
       setMeta((old) => ({ ...old, ...s.meta, accessToken: old.accessToken }));
       metaHydratedRef.current = true;
@@ -230,7 +257,7 @@ function App() {
     load();
     const timer = setInterval(load, 8000);
     return () => clearInterval(timer);
-  }, []);
+  }, [workspacePhoneId]);
 
   useEffect(() => {
     if (tab !== 'sends') return;
@@ -242,10 +269,10 @@ function App() {
       exclusionListIds: send.exclusionListIds,
       buttonFlowMap: send.buttonFlowMap,
       parameterMap: send.parameterMap,
-      phoneNumberId: send.phoneNumberId || null,
+      phoneNumberId: send.phoneNumberId || workspacePhoneId || null,
       sendNow: false,
     }).then((r) => setAudience(r.data)).catch(() => setAudience({ included: 0, excluded: 0, receivers: 0 }));
-  }, [tab, send.listIds, send.exclusionListIds, send.templateName, send.language]);
+  }, [tab, send.listIds, send.exclusionListIds, send.templateName, send.language, send.phoneNumberId, workspacePhoneId]);
 
   useEffect(() => {
     const contactRow = selectedConversation?.contact;
@@ -360,6 +387,7 @@ function App() {
     const phone = phoneNumbers.find((row) => (row.phoneNumberId || row.id) === id);
     return phone?.verifiedName || phone?.displayPhoneNumber || id;
   };
+  const workspaceLabel = workspacePhoneId ? phoneLabel(workspacePhoneId) : 'Todos os números';
   const filteredInbox = inbox.filter((conversation) => {
     const query = inboxSearch.trim().toLowerCase();
     const haystack = `${conversation.name || ''} ${conversation.phone || ''} ${phoneLabel(conversation.phoneNumberId)} ${messagePreview(conversation.lastMessage)}`.toLowerCase();
@@ -458,7 +486,7 @@ function App() {
   };
 
   const createList = async () => {
-    await http.post('/lists', { name: newListName });
+    await http.post('/lists', { name: newListName, phoneNumberId: workspacePhoneId || null });
     setNewListName('');
     notify('Lista salva');
     load();
@@ -467,7 +495,7 @@ function App() {
   const createInboxList = async () => {
     const name = window.prompt('Nome da nova lista');
     if (!name?.trim()) return;
-    const { data } = await http.post('/lists', { name: name.trim() });
+    const { data } = await http.post('/lists', { name: name.trim(), phoneNumberId: workspacePhoneId || null });
     setLeadDraft((current) => ({ ...current, lists: Array.from(new Set([...(current.lists || []), data.id])) }));
     notify('Lista criada e marcada no lead');
     load();
@@ -476,7 +504,7 @@ function App() {
   const createInboxTag = async () => {
     const name = window.prompt('Nome da nova tag');
     if (!name?.trim()) return;
-    const { data } = await http.post('/tags', { name: name.trim(), color: '#E0B870' });
+    const { data } = await http.post('/tags', { name: name.trim(), color: '#E0B870', phoneNumberId: workspacePhoneId || null });
     setLeadDraft((current) => ({ ...current, tags: Array.from(new Set([...(current.tags || []), data.id])) }));
     notify('Tag criada e marcada no lead');
     load();
@@ -522,7 +550,7 @@ function App() {
   };
 
   const createCustomField = async () => {
-    await http.post('/custom-fields', newField);
+    await http.post('/custom-fields', { ...newField, phoneNumberId: workspacePhoneId || null });
     setNewField({ key: '', label: '', type: 'text' });
     notify('Campo personalizado salvo');
     load();
@@ -550,6 +578,7 @@ function App() {
       tags: contact.tags.split(',').map((x) => x.trim()).filter(Boolean),
       lists: contact.lists.split(',').map((x) => x.trim()).filter(Boolean),
       customFields,
+      phoneNumberId: workspacePhoneId || null,
     });
     setContact({ name: '', phone: '', tags: '', lists: '', customFields: '' });
     notify('Contato salvo');
@@ -561,6 +590,7 @@ function App() {
     form.append('file', csvFile);
     form.append('listName', csvListName);
     form.append('tags', csvTags);
+    form.append('phoneNumberId', workspacePhoneId || '');
     const { data } = await http.post('/contacts/import-csv', form);
     notify(`${data.count} leads importados`);
     setCsvFile(null);
@@ -568,7 +598,7 @@ function App() {
   };
 
   const createFlow = async () => {
-    await http.post('/flows', { ...flow, actions: flowActions, enabled: true });
+    await http.post('/flows', { ...flow, actions: flowActions, enabled: true, phoneNumberId: workspacePhoneId || null });
     setFlow({ name: '', triggerValue: '' });
     setFlowActions([]);
     notify('Fluxo salvo');
@@ -585,7 +615,7 @@ function App() {
       exclusionListIds: send.exclusionListIds,
       buttonFlowMap: send.buttonFlowMap,
       parameterMap: send.parameterMap,
-      phoneNumberId: send.phoneNumberId || null,
+      phoneNumberId: send.phoneNumberId || workspacePhoneId || null,
       scheduledAt: send.scheduledAt || null,
       sendNow: forceNow ?? send.sendNow,
     });
@@ -637,10 +667,11 @@ function App() {
         tags: [],
         lists: [],
         customFields: {},
+        phoneNumberId: selectedConversation.conversation.phoneNumberId || workspacePhoneId || null,
       });
       contactId = data.id;
     }
-    await http.patch(`/contacts/${contactId}`, leadDraft);
+    await http.patch(`/contacts/${contactId}`, { ...leadDraft, phoneNumberId: selectedConversation?.conversation?.phoneNumberId || workspacePhoneId || null });
     notify('Dados do lead salvos');
     await openConversation(selectedConversation.conversation.id);
     load();
@@ -696,9 +727,22 @@ function App() {
             <div className="status-row">
               <span className={health?.ok ? 'status ok' : 'status'}>{health?.ok ? 'backend online' : 'backend offline'}</span>
               <span className={health?.metaConfigured ? 'status ok' : 'status warn'}>{health?.metaConfigured ? 'número conectado' : 'conexão pendente'}</span>
+              <span className="status">{workspaceLabel}</span>
             </div>
           </div>
-          <ThemeToggle theme={theme} onToggle={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} />
+          <div className="header-tools">
+            <label className="workspace-select">
+              <span>Ambiente</span>
+              <select value={workspacePhoneId} onChange={(e) => setWorkspacePhoneId(e.target.value)}>
+                <option value="">Todos os números</option>
+                {phoneNumbers.map((phone) => {
+                  const id = phone.phoneNumberId || phone.id;
+                  return <option key={id} value={id}>{phone.verifiedName || phone.displayPhoneNumber || id}</option>;
+                })}
+              </select>
+            </label>
+            <ThemeToggle theme={theme} onToggle={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} />
+          </div>
         </header>
 
         {tab === 'overview' && <>
