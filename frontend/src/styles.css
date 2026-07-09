@@ -441,6 +441,13 @@ h3 {
   grid-template-columns: minmax(260px, 420px) minmax(260px, 420px);
 }
 
+.flow-title-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+}
+
 .panel.inbox-panel {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr) 320px;
@@ -781,6 +788,29 @@ li {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.flow-row {
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, .8fr) auto auto minmax(170px, auto);
+}
+
+.flow-row.selected {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
+.row-actions button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .register-number-panel {

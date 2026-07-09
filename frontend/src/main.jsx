@@ -36,6 +36,7 @@ import {
   Stack,
   Sun,
   Tag,
+  PencilSimple,
   UploadSimple,
   UsersThree,
 } from '@phosphor-icons/react';
@@ -450,6 +451,7 @@ function App() {
   const [csvListName, setCsvListName] = useState('');
   const [csvTags, setCsvTags] = useState('');
   const [flow, setFlow] = useState({ name: '', triggerValue: '' });
+  const [editingFlowId, setEditingFlowId] = useState('');
   const [flowActions, setFlowActions] = useState([]);
   const [flowGraph, setFlowGraph] = useState(() => actionsToGraph([]));
   const [flowEditorKey, setFlowEditorKey] = useState(0);
@@ -860,13 +862,43 @@ function App() {
     load();
   };
 
-  const createFlow = async () => {
-    await http.post('/flows', { ...flow, actions: flowActions, nodes: flowGraph.nodes, edges: flowGraph.edges, enabled: true, phoneNumberId: workspacePhoneId || null });
+  const resetFlowEditor = () => {
     setFlow({ name: '', triggerValue: '' });
+    setEditingFlowId('');
     setFlowActions([]);
     setFlowGraph(actionsToGraph([]));
     setFlowEditorKey((current) => current + 1);
-    notify('Fluxo salvo');
+  };
+
+  const editFlow = (item) => {
+    const actions = item.actions || [];
+    const graph = item.nodes?.length ? { nodes: item.nodes, edges: item.edges || [] } : actionsToGraph(actions);
+    setFlow({ name: item.name || '', triggerValue: item.triggerValue || '' });
+    setEditingFlowId(item.id);
+    setFlowActions(actions);
+    setFlowGraph(graph);
+    setFlowEditorKey((current) => current + 1);
+    notify('Fluxo carregado para edicao');
+  };
+
+  const createFlow = async () => {
+    const payload = { ...flow, actions: flowActions, nodes: flowGraph.nodes, edges: flowGraph.edges, enabled: true, phoneNumberId: workspacePhoneId || null };
+    if (editingFlowId) {
+      await http.patch(`/flows/${editingFlowId}`, payload);
+      notify('Fluxo atualizado');
+    } else {
+      await http.post('/flows', payload);
+      notify('Fluxo salvo');
+    }
+    resetFlowEditor();
+    load();
+  };
+
+  const deleteFlow = async (id) => {
+    if (!window.confirm('Excluir este fluxo?')) return;
+    await http.delete(`/flows/${id}`);
+    if (editingFlowId === id) resetFlowEditor();
+    notify('Fluxo excluido');
     load();
   };
 
@@ -1272,11 +1304,28 @@ function App() {
         </section>}
 
         {tab === 'flows' && <section className="panel stack flow-panel">
-          <h2>Construção de fluxo</h2>
+          <div className="flow-title-row">
+            <div>
+              <h2>{editingFlowId ? 'Editar fluxo' : 'Construção de fluxo'}</h2>
+              {editingFlowId && <p className="muted">As alterações serão salvas no fluxo selecionado, sem criar uma cópia.</p>}
+            </div>
+            {editingFlowId && <Button variant="secondary" onClick={resetFlowEditor}>Novo fluxo</Button>}
+          </div>
           <div className="form-row"><Field label="Nome do fluxo"><input value={flow.name} onChange={(e) => setFlow({ ...flow, name: e.target.value })} /></Field><Field label="Botão/gatilho esperado"><input value={flow.triggerValue} onChange={(e) => setFlow({ ...flow, triggerValue: e.target.value })} /></Field></div>
           <FlowCanvasEditor key={flowEditorKey} actions={flowActions} setActions={setFlowActions} graph={flowGraph} setGraph={setFlowGraph} notify={notify} />
-          <Button onClick={createFlow} disabled={!flow.name}>Salvar fluxo</Button>
-          <div className="table">{flows.map((f) => <div className="row" key={f.id}><b>{f.name}</b><span>{f.triggerValue || '-'}</span><span>{(f.nodes || []).length || (f.actions || []).length} blocos</span><span>{f.enabled ? 'ativo' : 'pausado'}</span></div>)}</div>
+          <Button onClick={createFlow} disabled={!flow.name}>{editingFlowId ? 'Atualizar fluxo' : 'Salvar fluxo'}</Button>
+          <div className="table">{flows.map((f) => (
+            <div className={`row flow-row ${editingFlowId === f.id ? 'selected' : ''}`} key={f.id}>
+              <b>{f.name}</b>
+              <span>{f.triggerValue || '-'}</span>
+              <span>{(f.nodes || []).length || (f.actions || []).length} blocos</span>
+              <span>{f.enabled ? 'ativo' : 'pausado'}</span>
+              <div className="row-actions">
+                <button type="button" onClick={() => editFlow(f)}><PencilSimple size={15} /> Editar</button>
+                <button type="button" onClick={() => deleteFlow(f.id)}><Trash size={15} /> Excluir</button>
+              </div>
+            </div>
+          ))}</div>
         </section>}
 
         {tab === 'inbox' && <section className="inbox-panel">
