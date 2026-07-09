@@ -1170,17 +1170,28 @@ function App() {
             </div>
             <Button onClick={createContact}>Salvar contato</Button>
           </div>
-          <div className="two-col wide-left">
-            <div className="table">{contacts.map((c) => <button className="row clickable" onClick={() => openContact(c.id)} key={c.id}><b>{c.name || 'Sem nome'}</b><span>{c.phone}</span><span>{(c.tags || []).map(tagName).join(', ') || '-'}</span><span>{(c.lists || []).map(listName).join(', ') || '-'}</span></button>)}</div>
-            <div className="subpanel">
+          <div className="contacts-workspace">
+            <div className="contacts-list table">{contacts.map((c) => (
+              <button className={`row clickable contact-row ${selectedContact?.contact?.id === c.id ? 'selected' : ''}`} onClick={() => openContact(c.id)} key={c.id}>
+                <b>{c.name || 'Sem nome'}</b>
+                <span>{c.phone}</span>
+                <span>{(c.tags || []).map(tagName).join(', ') || '-'}</span>
+                <span>{(c.lists || []).map(listName).join(', ') || '-'}</span>
+              </button>
+            ))}</div>
+            <div className="subpanel contact-detail-panel">
               <h3>Detalhes do contato</h3>
               {!selectedContact ? <p className="muted">Clique em um contato para ver dados completos.</p> : <>
-                <b>{selectedContact.contact.name || 'Sem nome'}</b>
-                <span>{selectedContact.contact.phone}</span>
-                <p>Listas: {(selectedContact.contact.lists || []).map(listName).join(', ') || '-'}</p>
-                <p>Tags: {(selectedContact.contact.tags || []).map(tagName).join(', ') || '-'}</p>
-                <p>Campos: {Object.entries(selectedContact.contact.customFields || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '-'}</p>
-                <p className="muted">{selectedContact.messages.length} mensagens registradas</p>
+                <div className="contact-detail-card">
+                  <strong>{selectedContact.contact.name || 'Sem nome'}</strong>
+                  <span>{selectedContact.contact.phone}</span>
+                </div>
+                <div className="contact-detail-grid">
+                  <div><small>Listas</small><p>{(selectedContact.contact.lists || []).map(listName).join(', ') || '-'}</p></div>
+                  <div><small>Tags</small><p>{(selectedContact.contact.tags || []).map(tagName).join(', ') || '-'}</p></div>
+                  <div><small>Campos</small><p>{Object.entries(selectedContact.contact.customFields || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '-'}</p></div>
+                  <div><small>Mensagens</small><p>{selectedContact.messages.length} registradas</p></div>
+                </div>
               </>}
             </div>
           </div>
