@@ -920,6 +920,12 @@ function App() {
     load();
   };
 
+  const resumeCampaign = async (campaignId) => {
+    await http.post(`/campaigns/${campaignId}/resume`);
+    notify('Envio retomado. O progresso sera atualizado durante o disparo.');
+    load();
+  };
+
   const toggleArray = (field, id) => {
     setSend((current) => {
       const currentValues = new Set(current[field] || []);
@@ -1270,7 +1276,12 @@ function App() {
                     <b>{campaign.name}</b>
                     <span>{campaign.templateName} · {campaign.language}</span>
                   </div>
-                  <strong className={`campaign-badge ${campaignStatusClass(campaign)}`}>{campaignStatusLabel(campaign.status)}</strong>
+                  <div className="campaign-actions">
+                    <strong className={`campaign-badge ${campaignStatusClass(campaign)}`}>{campaignStatusLabel(campaign.status)}</strong>
+                    {(campaign.status === 'failed' || (campaign.status === 'running' && (campaign.results || []).length > 0)) && (
+                      <button type="button" onClick={() => resumeCampaign(campaign.id)}>Retomar</button>
+                    )}
+                  </div>
                 </div>
                 <div className="campaign-dates">
                   <span>Criado: {formatDateTime(campaign.createdAt)}</span>

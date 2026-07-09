@@ -594,96 +594,134 @@ def contacts_for_campaign(data: dict[str, Any], body: TemplateCampaignIn) -> lis
     return selected
 
 
-async def execute_campaign(campaign_id: str) -> None:
+def campaign_processed_keys(campaign: dict[str, Any]) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    for row in campaign.get("results") or []:
+        if row.get("contactId"):
+            keys.add(("id", str(row["contactId"])))
+        if row.get("phone"):
+            keys.add(("phone", normalize_phone(str(row["phone"]))))
+    return keys
+
+
+def summarize_campaign(campaign: dict[str, Any]) -> None:
+    results = campaign.get("results") or []
+    campaign["sent"] = sum(1 for row in results if row.get("status") == "sent")
+    campaign["failed"] = sum(1 for row in results if row.get("status") == "failed")
+    campaign["delivered"] = sum(1 for row in results if row.get("deliveredAt"))
+    campaign["read"] = sum(1 for row in results if row.get("readAt"))
+    campaign["buttonClicks"] = sum(1 for row in results if row.get("clickedAt"))
+    campaign["lastError"] = next((row.get("error") for row in reversed(results) if row.get("error")), None)
+    campaign["lastErrorText"] = next((row.get("errorText") for row in reversed(results) if row.get("errorText")), None)
+
+
+async def persist_campaign_result(campaign_id: str, row: dict[str, Any], target_count: int) -> None:
+    data = store.read()
+    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+    if not campaign:
+        return
+    campaign.setdefault("results", []).append(row)
+    campaign["targetCount"] = target_count
+    campaign["status"] = "running"
+    campaign["lastProgressAt"] = now_iso()
+    summarize_campaign(campaign)
+    await store.write(data)
+
+
+async def execute_campaign(campaign_id: str, resume: bool = False) -> None:
     data = store.read()
     campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
     if not campaign:
         return
     campaign["status"] = "running"
-    campaign["startedAt"] = now_iso()
+    campaign["startedAt"] = campaign.get("startedAt") or now_iso()
+    campaign["lastProgressAt"] = now_iso()
+    campaign.setdefault("results", [])
+    summarize_campaign(campaign)
     await store.write(data)
 
-    sent = 0
-    failed = 0
-    delivery_results: list[dict[str, Any]] = []
     body = TemplateCampaignIn(**campaign["config"])
     contacts = contacts_for_campaign(data, body)
-    for contact in contacts:
-        custom_fields = contact.get("customFields") or {}
-        template_params = {
-            key: custom_fields.get(field_key, contact.get(field_key, ""))
-            for key, field_key in (body.parameterMap or {}).items()
-        }
-        result = await send_sequence(
-            contact["phone"],
-            [MessageItem(
-                type="template",
-                templateName=body.templateName,
-                language=body.language,
-                templateParams=template_params,
-                phoneNumberId=body.phoneNumberId,
-            )],
-            source=f"campaign:{campaign_id}",
-        )
-        sent_message = next((msg for msg in result if msg["status"] == "sent"), None)
-        if sent_message:
-            sent += 1
-        else:
-            failed += 1
-        row_error = next((msg.get("error") for msg in result if msg.get("error")), None)
-        row_error_text = next((msg.get("errorText") for msg in result if msg.get("errorText")), None)
-        if not sent_message and not row_error_text:
-            row_error_text = (
-                "Envio nao foi aceito, mas a Meta nao retornou motivo. "
-                "Verifique se o template esta aprovado no idioma escolhido, se todos os parametros "
-                "obrigatorios foram preenchidos, se o telefone tem DDI e se o Phone Number ID esta correto."
+    processed = campaign_processed_keys(campaign) if resume else set()
+    try:
+        for contact in contacts:
+            contact_keys = {("id", str(contact.get("id"))), ("phone", normalize_phone(str(contact.get("phone") or "")))}
+            if processed and contact_keys & processed:
+                continue
+            custom_fields = contact.get("customFields") or {}
+            template_params = {
+                key: custom_fields.get(field_key, contact.get(field_key, ""))
+                for key, field_key in (body.parameterMap or {}).items()
+            }
+            result = await send_sequence(
+                contact["phone"],
+                [MessageItem(
+                    type="template",
+                    templateName=body.templateName,
+                    language=body.language,
+                    templateParams=template_params,
+                    phoneNumberId=body.phoneNumberId,
+                )],
+                source=f"campaign:{campaign_id}",
             )
-        delivery_results.append({
-            "contactId": contact.get("id"),
-            "name": contact.get("name"),
-            "phone": contact.get("phone"),
-            "status": "sent" if sent_message else "failed",
-            "messageIds": [msg.get("id") for msg in result],
-            "providerMessageIds": [msg.get("providerMessageId") for msg in result if msg.get("providerMessageId")],
-            "sentAt": sent_message.get("createdAt") if sent_message else None,
-            "deliveredAt": None,
-            "readAt": None,
-            "clickedAt": None,
-            "buttonText": None,
-            "error": row_error,
-            "errorText": row_error_text,
-            "diagnostic": {
-                "campaignId": campaign_id,
-                "templateName": body.templateName,
-                "language": body.language,
-                "phoneNumberId": body.phoneNumberId or active_phone_number_id(),
+            sent_message = next((msg for msg in result if msg["status"] == "sent"), None)
+            row_error = next((msg.get("error") for msg in result if msg.get("error")), None)
+            row_error_text = next((msg.get("errorText") for msg in result if msg.get("errorText")), None)
+            if not sent_message and not row_error_text:
+                row_error_text = (
+                    "Envio nao foi aceito, mas a Meta nao retornou motivo. "
+                    "Verifique se o template esta aprovado no idioma escolhido, se todos os parametros "
+                    "obrigatorios foram preenchidos, se o telefone tem DDI e se o Phone Number ID esta correto."
+                )
+            row = {
+                "contactId": contact.get("id"),
+                "name": contact.get("name"),
                 "phone": contact.get("phone"),
-                "templateParams": template_params,
-            },
-            "createdAt": now_iso(),
-        })
-        if body.buttonFlowMap:
-            await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
-        elif body.responseFlowId:
-            await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
-        else:
-            await set_pending_response_flow(contact["phone"], campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
+                "status": "sent" if sent_message else "failed",
+                "messageIds": [msg.get("id") for msg in result],
+                "providerMessageIds": [msg.get("providerMessageId") for msg in result if msg.get("providerMessageId")],
+                "sentAt": sent_message.get("createdAt") if sent_message else None,
+                "deliveredAt": None,
+                "readAt": None,
+                "clickedAt": None,
+                "buttonText": None,
+                "error": row_error,
+                "errorText": row_error_text,
+                "diagnostic": {
+                    "campaignId": campaign_id,
+                    "templateName": body.templateName,
+                    "language": body.language,
+                    "phoneNumberId": body.phoneNumberId or active_phone_number_id(),
+                    "phone": contact.get("phone"),
+                    "templateParams": template_params,
+                },
+                "createdAt": now_iso(),
+            }
+            await persist_campaign_result(campaign_id, row, len(contacts))
+            if body.buttonFlowMap:
+                await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
+            elif body.responseFlowId:
+                await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
+            else:
+                await set_pending_response_flow(contact["phone"], campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
+    except Exception as exc:
+        data = store.read()
+        campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+        if campaign:
+            campaign["status"] = "failed"
+            campaign["lastErrorText"] = str(exc)
+            campaign["failedAt"] = now_iso()
+            summarize_campaign(campaign)
+            await store.write(data)
+        return
 
     data = store.read()
     campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
     if campaign:
-        campaign.update({
-            "status": "done",
-            "sent": sent,
-            "failed": failed,
-            "delivered": sum(1 for row in delivery_results if row.get("deliveredAt")),
-            "read": sum(1 for row in delivery_results if row.get("readAt")),
-            "buttonClicks": sum(1 for row in delivery_results if row.get("clickedAt")),
-            "results": delivery_results,
-            "lastError": next((row.get("error") for row in reversed(delivery_results) if row.get("error")), None),
-            "lastErrorText": next((row.get("errorText") for row in reversed(delivery_results) if row.get("errorText")), None),
-            "finishedAt": now_iso(),
-        })
+        campaign["status"] = "done"
+        campaign["targetCount"] = len(contacts)
+        campaign["finishedAt"] = now_iso()
+        summarize_campaign(campaign)
     await store.write(data)
 
 
@@ -1706,3 +1744,17 @@ async def create_campaign(body: TemplateCampaignIn, background: BackgroundTasks)
     if body.sendNow:
         background.add_task(execute_campaign, doc["id"])
     return doc
+
+
+@app.post("/api/campaigns/{campaign_id}/resume")
+async def resume_campaign(campaign_id: str, background: BackgroundTasks) -> dict[str, Any]:
+    data = store.read()
+    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    campaign["status"] = "running"
+    campaign["lastResumeAt"] = now_iso()
+    campaign["lastErrorText"] = None
+    await store.write(data)
+    background.add_task(execute_campaign, campaign_id, True)
+    return campaign
