@@ -1154,8 +1154,8 @@ li {
 }
 
 .inbox-panel {
-  height: calc(100vh - 220px);
-  min-height: 560px;
+  height: min(760px, calc(100dvh - 338px));
+  min-height: 520px;
   display: grid;
   grid-template-columns: minmax(290px, 336px) minmax(460px, 1fr) minmax(300px, 340px);
   margin-top: 0;
@@ -1169,6 +1169,7 @@ li {
 .inbox-conversations,
 .lead-side {
   min-width: 0;
+  min-height: 0;
   padding: 0;
   border-right: 0;
   background: var(--surface-soft);
@@ -1181,6 +1182,7 @@ li {
 }
 
 .inbox-column-head {
+  flex: 0 0 auto;
   padding: 24px 22px 16px;
   display: grid;
   gap: 14px;
@@ -1380,6 +1382,7 @@ li {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: radial-gradient(120% 80% at 50% 0%, rgba(var(--accent-rgb), 0.05), transparent 55%);
 }
 
@@ -1694,7 +1697,7 @@ li {
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  overflow: auto;
+  overflow: hidden;
   min-height: 0;
 }
 
@@ -1732,9 +1735,11 @@ li {
 
 .lead-body {
   flex: 1;
+  min-height: 0;
   display: grid;
   align-content: start;
   gap: 22px;
+  overflow: auto;
   padding: 22px 24px;
 }
 
