@@ -26,6 +26,7 @@ import {
   GitBranch,
   ImageSquare,
   MagnifyingGlass,
+  Microphone,
   Moon,
   PaperPlaneTilt,
   Paperclip,
@@ -39,6 +40,7 @@ import {
   PencilSimple,
   UploadSimple,
   UsersThree,
+  VideoCamera,
 } from '@phosphor-icons/react';
 import './styles.css';
 
@@ -457,11 +459,14 @@ function App() {
   const [flowEditorKey, setFlowEditorKey] = useState(0);
   const [send, setSend] = useState({ name: '', listIds: [], templateName: '', language: 'pt_BR', responseFlowId: '', exclusionListIds: [], scheduledAt: '', sendNow: true, buttonFlowMap: {}, parameterMap: {}, phoneNumberId: '' });
   const [replyItems, setReplyItems] = useState([]);
+  const [replyText, setReplyText] = useState('');
   const [metaHydrated, setMetaHydrated] = useState(false);
   const metaHydratedRef = useRef(false);
   const workspaceHydratedRef = useRef(Boolean(workspacePhoneId));
   const inboxAttachmentRef = useRef(null);
   const inboxImageRef = useRef(null);
+  const inboxVideoRef = useRef(null);
+  const inboxAudioRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -802,16 +807,7 @@ function App() {
   const addInboxEmoji = () => {
     const emoji = window.prompt('Digite ou cole o emoji');
     if (!emoji?.trim()) return;
-    setReplyItems((current) => {
-      const items = [...current];
-      const lastTextIndex = [...items].reverse().findIndex((item) => item.type === 'send_message');
-      if (lastTextIndex >= 0) {
-        const index = items.length - 1 - lastTextIndex;
-        items[index] = { ...items[index], text: `${items[index].text || ''}${emoji.trim()}` };
-        return items;
-      }
-      return [...items, { type: 'send_message', text: emoji.trim(), delaySeconds: 0, mediaUrl: '', caption: '' }];
-    });
+    setReplyText((current) => `${current}${emoji.trim()}`);
   };
 
   const createCustomField = async () => {
@@ -992,9 +988,15 @@ function App() {
   };
 
   const reply = async () => {
+    const text = replyText.trim();
+    const items = [
+      ...replyItems,
+      ...(text ? [{ type: 'send_message', text, delaySeconds: 0, mediaUrl: '', caption: '' }] : []),
+    ];
+    if (!items.length) return;
     await http.post(`/inbox/${selectedConversation.conversation.id}/reply`, {
       phone: selectedConversation.conversation.phone,
-      items: replyItems.map((item) => ({
+      items: items.map((item) => ({
         type: item.type === 'send_message' ? 'text' : item.type,
         text: item.text,
         mediaUrl: item.mediaUrl,
@@ -1004,6 +1006,7 @@ function App() {
       })),
     });
     setReplyItems([]);
+    setReplyText('');
     notify('Resposta enviada');
     openConversation(selectedConversation.conversation.id);
   };
@@ -1436,9 +1439,18 @@ function App() {
                   <button className={inboxComposerMode === 'flow' ? 'active' : ''} onClick={() => setInboxComposerMode('flow')}><FlowArrow size={14} /> Fluxo</button>
                 </div>
                 {inboxComposerMode === 'reply' ? (
-                  <div className="reply-card">
-                    <SequenceEditor items={replyItems} setItems={setReplyItems} notify={notify} />
-                    <div className="composer-shortcuts">
+                  <div className="quick-reply-card">
+                    {replyItems.length > 0 && (
+                      <div className="quick-attachments">
+                        {replyItems.map((item, index) => (
+                          <span key={`${item.type}-${index}`}>
+                            {item.type}
+                            <button type="button" onClick={() => setReplyItems((current) => current.filter((_, itemIndex) => itemIndex !== index))}>x</button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="quick-reply-bar">
                       <input ref={inboxAttachmentRef} className="hidden-file" type="file" onChange={(e) => {
                         addInboxAttachment(e.target.files?.[0]);
                         e.target.value = '';
@@ -1447,11 +1459,32 @@ function App() {
                         addInboxAttachment(e.target.files?.[0], 'image');
                         e.target.value = '';
                       }} />
+                      <input ref={inboxVideoRef} className="hidden-file" type="file" accept="video/*" onChange={(e) => {
+                        addInboxAttachment(e.target.files?.[0], 'video');
+                        e.target.value = '';
+                      }} />
+                      <input ref={inboxAudioRef} className="hidden-file" type="file" accept="audio/*" onChange={(e) => {
+                        addInboxAttachment(e.target.files?.[0], 'audio');
+                        e.target.value = '';
+                      }} />
                       <button type="button" title="Adicionar anexo" onClick={() => inboxAttachmentRef.current?.click()}><Paperclip size={16} /></button>
                       <button type="button" title="Adicionar imagem" onClick={() => inboxImageRef.current?.click()}><ImageSquare size={16} /></button>
+                      <button type="button" title="Adicionar vídeo" onClick={() => inboxVideoRef.current?.click()}><VideoCamera size={16} /></button>
+                      <button type="button" title="Adicionar áudio" onClick={() => inboxAudioRef.current?.click()}><Microphone size={16} /></button>
                       <button type="button" title="Adicionar emoji" onClick={addInboxEmoji}><Smiley size={16} /></button>
-                      <button type="button" className="model-shortcut" title="Adicionar modelo" onClick={() => notify('Seleção de modelo na Inbox ainda será conectada aos templates')}><Stack size={15} /> Modelo</button>
-                      <Button onClick={reply} disabled={replyItems.length === 0}>Responder <PaperPlaneTilt size={15} /></Button>
+                      <button type="button" className="model-shortcut" title="Adicionar modelo" onClick={() => notify('Seleção de modelo na Inbox ainda será conectada aos templates')}><Stack size={15} /></button>
+                      <textarea
+                        value={replyText}
+                        onChange={(e) => setReplyText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            reply();
+                          }
+                        }}
+                        placeholder="Escreva uma mensagem..."
+                      />
+                      <button type="button" className="send-now-button" onClick={reply} disabled={!replyText.trim() && replyItems.length === 0} title="Enviar"><PaperPlaneTilt size={18} weight="fill" /></button>
                     </div>
                   </div>
                 ) : (
