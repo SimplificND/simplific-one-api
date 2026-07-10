@@ -617,7 +617,7 @@ function App() {
     if (Number.isNaN(date.getTime())) return '-';
     return date.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
   };
-  const messagePreview = (message) => message?.text || message?.payload?.caption || message?.payload?.mediaUrl || message?.type || '-';
+  const messagePreview = (message) => message?.displayText || message?.text || message?.payload?.caption || message?.payload?.mediaUrl || message?.type || '-';
   const campaignStatusLabel = (status) => ({
     running: 'Processando',
     scheduled: 'Agendado',

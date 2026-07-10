@@ -35,6 +35,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def start_scheduled_workers() -> None:
+    await backfill_blacklist_from_button_clicks()
     asyncio.create_task(scheduled_campaign_loop())
 
 
@@ -322,8 +323,55 @@ def extract_template_params(template: dict[str, Any]) -> list[str]:
     return params
 
 
-def template_by_name(data: dict[str, Any], name: str, language: str) -> Optional[dict[str, Any]]:
-    return next((t for t in data["templates"] if t.get("name") == name and (t.get("language") == language or not language)), None)
+def template_by_name(
+    data: dict[str, Any],
+    name: str,
+    language: str,
+    phone_number_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    matches = [
+        t
+        for t in data["templates"]
+        if t.get("name") == name and (t.get("language") == language or not language)
+    ]
+    if phone_number_id:
+        scoped_match = next((t for t in matches if scoped(t, phone_number_id)), None)
+        if scoped_match:
+            return scoped_match
+    return next(iter(matches), None)
+
+
+def template_preview_text(data: dict[str, Any], item: MessageItem | dict[str, Any]) -> str:
+    payload = item.model_dump() if isinstance(item, MessageItem) else item
+    name = payload.get("templateName") or payload.get("template", {}).get("name")
+    language = payload.get("language") or (payload.get("template", {}).get("language") or {}).get("code") or ""
+    phone_number_id = payload.get("phoneNumberId")
+    if not name:
+        return ""
+    template = template_by_name(data, name, language, phone_number_id) or template_by_name(data, name, "", phone_number_id)
+    text = (template or {}).get("bodyPreview") or name
+    params = payload.get("templateParams") or {}
+    for key, value in params.items():
+        text = re.sub(r"\{\{\s*" + re.escape(str(key)) + r"\s*\}\}", str(value or ""), text)
+    return text
+
+
+def message_display_text(data: dict[str, Any], message: dict[str, Any]) -> str:
+    if message.get("type") == "template":
+        return template_preview_text(data, message.get("payload") or {}) or message.get("text") or message.get("type") or "-"
+    return (
+        message.get("text")
+        or (message.get("payload") or {}).get("caption")
+        or (message.get("payload") or {}).get("mediaUrl")
+        or message.get("type")
+        or "-"
+    )
+
+
+def with_display_text(data: dict[str, Any], message: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not message:
+        return None
+    return {**message, "displayText": message_display_text(data, message)}
 
 
 def template_body_components(template_params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -392,6 +440,28 @@ def attach_labels(contact: dict[str, Any], tags: list[str], lists: list[str], cu
     if custom_fields:
         contact["customFields"] = {**(contact.get("customFields") or {}), **custom_fields}
     contact["updatedAt"] = now_iso()
+
+
+def resolve_tag_ids(data: dict[str, Any], values: list[str], phone_number_id: Optional[str] = None) -> list[str]:
+    ids: list[str] = []
+    for value in values or []:
+        if not value:
+            continue
+        text = str(value).strip()
+        existing = next((tag for tag in data["tags"] if tag.get("id") == text), None)
+        ids.append(existing["id"] if existing else ensure_named_tag(data, text, phone_number_id))
+    return [item for item in ids if item]
+
+
+def resolve_list_ids(data: dict[str, Any], values: list[str], phone_number_id: Optional[str] = None) -> list[str]:
+    ids: list[str] = []
+    for value in values or []:
+        if not value:
+            continue
+        text = str(value).strip()
+        existing = next((row for row in data["lists"] if row.get("id") == text), None)
+        ids.append(existing["id"] if existing else ensure_named_list(data, text, phone_number_id))
+    return [item for item in ids if item]
 
 
 def meta_message_id(response: Any) -> Optional[str]:
@@ -497,7 +567,7 @@ async def send_sequence(phone: str, items: list[MessageItem], source: str = "man
             "phoneNumberId": item.phoneNumberId or sequence_phone_number_id,
             "direction": "out",
             "type": item.type,
-            "text": item.text or item.caption or item.templateName or item.mediaUrl,
+            "text": template_preview_text(data, item) if item.type == "template" else (item.text or item.caption or item.mediaUrl),
             "payload": item.model_dump(),
             "status": status,
             "source": source,
@@ -552,6 +622,51 @@ def ensure_named_tag(data: dict[str, Any], name: str, phone_number_id: Optional[
     return doc["id"]
 
 
+def inbound_button_text(message: dict[str, Any]) -> str:
+    payload = message.get("payload") or {}
+    interactive = payload.get("interactive") or {}
+    return str(
+        message.get("text")
+        or (payload.get("button") or {}).get("text")
+        or (interactive.get("button_reply") or {}).get("title")
+        or (interactive.get("list_reply") or {}).get("title")
+        or ""
+    ).strip()
+
+
+def is_blacklist_button_text(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    return normalized in {"bloquear contato", "blacklist"} or "bloquear contato" in normalized
+
+
+async def backfill_blacklist_from_button_clicks() -> None:
+    data = store.read()
+    changed = 0
+    for message in data.get("messages", []):
+        if message.get("direction") != "in" or not is_blacklist_button_text(inbound_button_text(message)):
+            continue
+        contact = next(
+            (
+                row
+                for row in data["contacts"]
+                if row.get("id") == message.get("contactId")
+                or row.get("phone") == normalize_phone(str(message.get("phone") or ""))
+            ),
+            None,
+        )
+        if not contact:
+            continue
+        channel_id = message.get("phoneNumberId") or contact.get("lastPhoneNumberId")
+        blacklist_id = ensure_named_list(data, "Blacklist", channel_id)
+        before = set(contact.get("lists") or [])
+        attach_labels(contact, [], [blacklist_id])
+        if set(contact.get("lists") or []) != before:
+            changed += 1
+    if changed:
+        await store.write(data)
+        print(f"Applied Blacklist backfill to {changed} contacts")
+
+
 async def run_flow_for_contact(phone: str, flow_id: str, source: str = "flow") -> dict[str, Any]:
     data = store.read()
     flow = next((f for f in data["flows"] if f["id"] == flow_id and f.get("enabled", True)), None)
@@ -566,9 +681,9 @@ async def run_flow_for_contact(phone: str, flow_id: str, source: str = "flow") -
         if action_type == "delay":
             await asyncio.sleep(int(action.get("delaySeconds") or 0))
         elif action_type == "add_tags":
-            attach_labels(contact, action.get("tags") or [], [])
+            attach_labels(contact, resolve_tag_ids(data, action.get("tags") or [], flow_phone_number_id), [])
         elif action_type == "add_lists":
-            attach_labels(contact, [], action.get("lists") or [])
+            attach_labels(contact, [], resolve_list_ids(data, action.get("lists") or [], flow_phone_number_id))
         elif action_type == "send_message":
             sent_items.append(MessageItem(type="text", text=action.get("text"), phoneNumberId=flow_phone_number_id, delaySeconds=int(action.get("delaySeconds") or 0)))
         elif action_type in {"image", "video", "audio", "document"}:
@@ -776,7 +891,11 @@ async def run_matching_automations(phone: str, inbound: dict[str, Any]) -> None:
         contact = upsert_contact(data, phone, inbound.get("name"), channel_id)
     matches = [a for a in data["automations"] if scoped(a, channel_id) and automation_matches(a, inbound)]
     for automation in matches:
-        attach_labels(contact, automation.get("addTags") or [], automation.get("addLists") or [])
+        attach_labels(
+            contact,
+            resolve_tag_ids(data, automation.get("addTags") or [], channel_id),
+            resolve_list_ids(data, automation.get("addLists") or [], channel_id),
+        )
         data["automationRuns"].append({
             "id": new_id("run"),
             "automationId": automation["id"],
@@ -1440,7 +1559,7 @@ async def get_contact(contact_id: str) -> dict[str, Any]:
     if not contact:
         raise HTTPException(404, "Contato não encontrado")
     messages = [m for m in data["messages"] if m.get("contactId") == contact_id]
-    return {"contact": contact, "messages": messages[-50:]}
+    return {"contact": contact, "messages": [with_display_text(data, m) for m in messages[-50:]]}
 
 
 @app.patch("/api/contacts/{contact_id}")
@@ -1579,7 +1698,7 @@ async def inbox(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
     for convo in data["conversations"]:
         if not scoped(convo, phoneNumberId):
             continue
-        conversations.append({**convo, "lastMessage": latest_by_convo.get(convo["id"])})
+        conversations.append({**convo, "lastMessage": with_display_text(data, latest_by_convo.get(convo["id"]))})
     return sorted(conversations, key=lambda c: c.get("lastMessageAt", ""), reverse=True)
 
 
@@ -1598,7 +1717,7 @@ async def conversation(conversation_id: str) -> dict[str, Any]:
             "open": bool(convo.get("lastInboundAt") and datetime.fromisoformat(convo["lastInboundAt"]) > datetime.now(timezone.utc) - timedelta(hours=24)),
             "lastInboundAt": convo.get("lastInboundAt"),
         },
-        "messages": [m for m in data["messages"] if m["conversationId"] == conversation_id],
+        "messages": [with_display_text(data, m) for m in data["messages"] if m["conversationId"] == conversation_id],
     }
 
 
