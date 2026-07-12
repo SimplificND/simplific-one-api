@@ -909,7 +909,7 @@ function App() {
       buttonFlowMap: send.buttonFlowMap,
       parameterMap: send.parameterMap,
       phoneNumberId: send.phoneNumberId || workspacePhoneId || null,
-      batchSize: Math.max(1, Math.min(Number(send.batchSize) || 50, 200)),
+      batchSize: Math.max(1, Math.min(Number(send.batchSize) || 50, 100)),
       batchPauseSeconds: Math.max(0, Math.min(Number(send.batchPauseSeconds) || 0, 300)),
       scheduledAt: send.scheduledAt || null,
       sendNow: forceNow ?? send.sendNow,
@@ -1279,7 +1279,7 @@ function App() {
                 <input
                   type="number"
                   min="1"
-                  max="200"
+                  max="100"
                   value={send.batchSize}
                   onChange={(e) => setSend({ ...send, batchSize: e.target.value })}
                 />
@@ -1294,7 +1294,7 @@ function App() {
                 />
               </Field>
             </div>
-            <p className="muted">Para números com limite alto, use lotes maiores. Padrão seguro: 50 em paralelo com 1s de pausa.</p>
+            <p className="muted">Para números com limite alto, use lotes maiores. Padrão seguro: 50 em paralelo; máximo operacional: 100 por lote.</p>
           </div>
           <div className="inline-actions"><Button onClick={() => createSend(true)} disabled={!send.name || !send.templateName}>Disparar agora</Button><Button variant="secondary" onClick={() => createSend(false)} disabled={!send.name || !send.templateName}>Salvar/agendar</Button></div>
           <div className="campaign-results">
