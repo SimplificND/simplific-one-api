@@ -228,6 +228,14 @@ class TemplateCampaignIn(BaseModel):
     scheduledAt: Optional[str] = None
 
 
+class CampaignUpdateIn(BaseModel):
+    name: Optional[str] = None
+    scheduledAt: Optional[str] = None
+    batchSize: Optional[int] = Field(default=None, ge=1, le=200)
+    batchPauseSeconds: Optional[int] = Field(default=None, ge=0, le=300)
+    sendNow: Optional[bool] = None
+
+
 class AutomationIn(BaseModel):
     name: str
     enabled: bool = True
@@ -888,6 +896,9 @@ async def execute_campaign(campaign_id: str, resume: bool = False) -> None:
     batch_pause = max(0, min(int(body.batchPauseSeconds or 0), 300))
     try:
         for start in range(0, len(pending_contacts), batch_size):
+            current = next((c for c in store.read()["campaigns"] if c["id"] == campaign_id), None)
+            if current and current.get("status") == "canceled":
+                return
             batch = pending_contacts[start:start + batch_size]
             batch_results = await asyncio.gather(*(execute_campaign_contact(campaign_id, body, contact) for contact in batch))
             await persist_campaign_batch(campaign_id, body, batch_results, len(contacts))
@@ -1947,9 +1958,84 @@ async def resume_campaign(campaign_id: str, background: BackgroundTasks) -> dict
     campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.get("status") == "canceled":
+        raise HTTPException(status_code=400, detail="Campanha cancelada")
     campaign["status"] = "running"
     campaign["lastResumeAt"] = now_iso()
     campaign["lastErrorText"] = None
+    await store.write(data)
+    background.add_task(execute_campaign, campaign_id, True)
+    return campaign
+
+
+@app.patch("/api/campaigns/{campaign_id}")
+async def update_campaign(campaign_id: str, body: CampaignUpdateIn, background: BackgroundTasks) -> dict[str, Any]:
+    data = store.read()
+    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.get("status") in {"done", "running"} and not body.sendNow:
+        raise HTTPException(status_code=400, detail="Somente campanhas agendadas, rascunhos ou falhas podem ser editadas")
+    config = campaign.setdefault("config", {})
+    if body.name is not None:
+        campaign["name"] = body.name
+        config["name"] = body.name
+    if body.scheduledAt is not None:
+        campaign["scheduledAt"] = body.scheduledAt or None
+        config["scheduledAt"] = body.scheduledAt or None
+        config["sendNow"] = False
+        campaign["status"] = "scheduled" if body.scheduledAt else "draft"
+    if body.batchSize is not None:
+        config["batchSize"] = body.batchSize
+    if body.batchPauseSeconds is not None:
+        config["batchPauseSeconds"] = body.batchPauseSeconds
+    campaign["updatedAt"] = now_iso()
+    if body.sendNow:
+        campaign["scheduledAt"] = None
+        config["scheduledAt"] = None
+        config["sendNow"] = True
+        campaign["status"] = "running"
+        campaign["lastResumeAt"] = now_iso()
+        campaign["lastErrorText"] = None
+        await store.write(data)
+        background.add_task(execute_campaign, campaign_id, True)
+        return campaign
+    await store.write(data)
+    return campaign
+
+
+@app.post("/api/campaigns/{campaign_id}/cancel")
+async def cancel_campaign(campaign_id: str) -> dict[str, Any]:
+    data = store.read()
+    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    campaign["status"] = "canceled"
+    campaign["canceledAt"] = now_iso()
+    campaign["lastErrorText"] = None
+    await store.write(data)
+    return campaign
+
+
+@app.post("/api/campaigns/{campaign_id}/retry-failed")
+async def retry_failed_campaign(campaign_id: str, background: BackgroundTasks) -> dict[str, Any]:
+    data = store.read()
+    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    failed_rows = [row for row in campaign.get("results") or [] if row.get("status") == "failed"]
+    if not failed_rows:
+        raise HTTPException(status_code=400, detail="Nenhum lead com falha para reenviar")
+    failed_keys = {(row.get("contactId"), normalize_phone(str(row.get("phone") or ""))) for row in failed_rows}
+    campaign["results"] = [
+        row
+        for row in campaign.get("results") or []
+        if (row.get("contactId"), normalize_phone(str(row.get("phone") or ""))) not in failed_keys
+    ]
+    campaign["status"] = "running"
+    campaign["lastRetryFailedAt"] = now_iso()
+    campaign["lastErrorText"] = None
+    summarize_campaign(campaign)
     await store.write(data)
     background.add_task(execute_campaign, campaign_id, True)
     return campaign

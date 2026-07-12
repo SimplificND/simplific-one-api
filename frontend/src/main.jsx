@@ -624,6 +624,7 @@ function App() {
     draft: 'Rascunho',
     done: 'Concluído',
     failed: 'Falhou',
+    canceled: 'Cancelado',
   }[status] || status || '-');
   const campaignStatusClass = (campaign) => {
     if (campaign.failed > 0) return 'warn';
@@ -921,6 +922,41 @@ function App() {
   const resumeCampaign = async (campaignId) => {
     await http.post(`/campaigns/${campaignId}/resume`);
     notify('Envio retomado. O progresso sera atualizado durante o disparo.');
+    load();
+  };
+
+  const cancelCampaign = async (campaignId) => {
+    if (!window.confirm('Cancelar este envio?')) return;
+    await http.post(`/campaigns/${campaignId}/cancel`);
+    notify('Envio cancelado');
+    load();
+  };
+
+  const retryFailedCampaign = async (campaignId) => {
+    await http.post(`/campaigns/${campaignId}/retry-failed`);
+    notify('Reenvio das falhas iniciado');
+    load();
+  };
+
+  const sendCampaignNow = async (campaignId) => {
+    await http.patch(`/campaigns/${campaignId}`, { sendNow: true });
+    notify('Envio iniciado agora');
+    load();
+  };
+
+  const editCampaignSettings = async (campaign) => {
+    const batchSize = window.prompt('Lote paralelo', campaign.config?.batchSize || 50);
+    if (batchSize === null) return;
+    const batchPauseSeconds = window.prompt('Pausa entre lotes (s)', campaign.config?.batchPauseSeconds ?? 1);
+    if (batchPauseSeconds === null) return;
+    const scheduledAt = window.prompt('Agendamento (YYYY-MM-DDTHH:mm) ou vazio para rascunho', campaign.scheduledAt || '');
+    if (scheduledAt === null) return;
+    await http.patch(`/campaigns/${campaign.id}`, {
+      batchSize: Math.max(1, Math.min(Number(batchSize) || 50, 100)),
+      batchPauseSeconds: Math.max(0, Math.min(Number(batchPauseSeconds) || 0, 300)),
+      scheduledAt,
+    });
+    notify('Configurações atualizadas');
     load();
   };
 
@@ -1307,6 +1343,18 @@ function App() {
                   </div>
                   <div className="campaign-actions">
                     <strong className={`campaign-badge ${campaignStatusClass(campaign)}`}>{campaignStatusLabel(campaign.status)}</strong>
+                    {['scheduled', 'draft', 'failed'].includes(campaign.status) && (
+                      <button type="button" onClick={() => editCampaignSettings(campaign)}>Editar</button>
+                    )}
+                    {['scheduled', 'draft', 'failed', 'canceled'].includes(campaign.status) && (
+                      <button type="button" onClick={() => sendCampaignNow(campaign.id)}>Enviar agora</button>
+                    )}
+                    {['scheduled', 'draft', 'running'].includes(campaign.status) && (
+                      <button type="button" onClick={() => cancelCampaign(campaign.id)}>Cancelar</button>
+                    )}
+                    {(campaign.failed || 0) > 0 && (
+                      <button type="button" onClick={() => retryFailedCampaign(campaign.id)}>Reenviar falhas</button>
+                    )}
                     {(campaign.status === 'failed' || (campaign.status === 'running' && (campaign.results || []).length > 0)) && (
                       <button type="button" onClick={() => resumeCampaign(campaign.id)}>Retomar</button>
                     )}
