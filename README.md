@@ -72,4 +72,5 @@ pytest -v
 
 Os testes usam dados sintéticos (não tocam produção) e, quando necessário,
 sobem o próprio processo `uvicorn` contra um `STORAGE_DIR` temporário para
-simular cenários reais de concorrência e reinício.
+simular cenários reais como reinício do container com campanha em andamento
+e concorrência (ex.: envios de campanha + webhooks simultâneos).
