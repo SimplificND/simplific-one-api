@@ -112,6 +112,7 @@ class JsonStore:
 
 
 store = JsonStore(STORE_PATH)
+STORE_MUTATION_LOCK = asyncio.Lock()
 
 
 class LeadIn(BaseModel):
@@ -221,6 +222,8 @@ class TemplateCampaignIn(BaseModel):
     buttonFlowMap: dict[str, str] = {}
     parameterMap: dict[str, str] = {}
     phoneNumberId: Optional[str] = None
+    batchSize: int = Field(default=50, ge=1, le=200)
+    batchPauseSeconds: int = Field(default=1, ge=0, le=300)
     sendNow: bool = True
     scheduledAt: Optional[str] = None
 
@@ -541,11 +544,9 @@ async def meta_send(item: MessageItem, phone: str) -> dict[str, Any]:
 
 
 async def send_sequence(phone: str, items: list[MessageItem], source: str = "manual") -> list[dict[str, Any]]:
-    data = store.read()
-    sequence_phone_number_id = next((item.phoneNumberId for item in items if item.phoneNumberId), None) or active_phone_number_id(data)
-    contact = upsert_contact(data, phone, phone_number_id=sequence_phone_number_id)
-    convo = conversation_for(data, phone, contact.get("name"), sequence_phone_number_id)
-    results: list[dict[str, Any]] = []
+    initial_data = store.read()
+    sequence_phone_number_id = next((item.phoneNumberId for item in items if item.phoneNumberId), None) or active_phone_number_id(initial_data)
+    sent_items: list[tuple[MessageItem, str, Any, Any, str]] = []
     for index, item in enumerate(items):
         if not item.phoneNumberId and sequence_phone_number_id:
             item.phoneNumberId = sequence_phone_number_id
@@ -559,41 +560,50 @@ async def send_sequence(phone: str, items: list[MessageItem], source: str = "man
         except HTTPException as e:
             status = "failed"
             error = e.detail
-        msg = {
-            "id": new_id("msg"),
-            "conversationId": convo["id"],
-            "contactId": contact["id"],
-            "phone": contact["phone"],
-            "phoneNumberId": item.phoneNumberId or sequence_phone_number_id,
-            "direction": "out",
-            "type": item.type,
-            "text": template_preview_text(data, item) if item.type == "template" else (item.text or item.caption or item.mediaUrl),
-            "payload": item.model_dump(),
-            "status": status,
-            "source": source,
-            "providerMessageId": meta_message_id(response),
-            "providerResponse": response,
-            "error": error,
-            "errorText": readable_error(error),
-            "createdAt": now_iso(),
-        }
-        data["messages"].append(msg)
-        results.append(msg)
-    convo["lastMessageAt"] = now_iso()
-    await store.write(data)
-    return results
+        sent_items.append((item, status, response, error, now_iso()))
+
+    async with STORE_MUTATION_LOCK:
+        data = store.read()
+        contact = upsert_contact(data, phone, phone_number_id=sequence_phone_number_id)
+        convo = conversation_for(data, phone, contact.get("name"), sequence_phone_number_id)
+        results: list[dict[str, Any]] = []
+        for item, status, response, error, created_at in sent_items:
+            msg = {
+                "id": new_id("msg"),
+                "conversationId": convo["id"],
+                "contactId": contact["id"],
+                "phone": contact["phone"],
+                "phoneNumberId": item.phoneNumberId or sequence_phone_number_id,
+                "direction": "out",
+                "type": item.type,
+                "text": template_preview_text(data, item) if item.type == "template" else (item.text or item.caption or item.mediaUrl),
+                "payload": item.model_dump(),
+                "status": status,
+                "source": source,
+                "providerMessageId": meta_message_id(response),
+                "providerResponse": response,
+                "error": error,
+                "errorText": readable_error(error),
+                "createdAt": created_at,
+            }
+            data["messages"].append(msg)
+            results.append(msg)
+        convo["lastMessageAt"] = now_iso()
+        await store.write(data)
+        return results
 
 
 async def set_pending_response_flow(phone: str, response_flow_id: Optional[str] = None, button_flow_map: Optional[dict[str, str]] = None, campaign_id: Optional[str] = None, phone_number_id: Optional[str] = None) -> None:
-    data = store.read()
-    contact = upsert_contact(data, phone, phone_number_id=phone_number_id)
-    if button_flow_map:
-        contact["pendingResponseFlows"] = button_flow_map
-    elif response_flow_id:
-        contact["pendingResponseFlowId"] = response_flow_id
-    if campaign_id:
-        contact["pendingCampaignId"] = campaign_id
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = store.read()
+        contact = upsert_contact(data, phone, phone_number_id=phone_number_id)
+        if button_flow_map:
+            contact["pendingResponseFlows"] = button_flow_map
+        elif response_flow_id:
+            contact["pendingResponseFlowId"] = response_flow_id
+        if campaign_id:
+            contact["pendingCampaignId"] = campaign_id
+        await store.write(data)
 
 
 def ensure_named_list(data: dict[str, Any], name: str, phone_number_id: Optional[str] = None) -> str:
@@ -731,16 +741,76 @@ def summarize_campaign(campaign: dict[str, Any]) -> None:
 
 
 async def persist_campaign_result(campaign_id: str, row: dict[str, Any], target_count: int) -> None:
-    data = store.read()
-    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
-    if not campaign:
-        return
-    campaign.setdefault("results", []).append(row)
-    campaign["targetCount"] = target_count
-    campaign["status"] = "running"
-    campaign["lastProgressAt"] = now_iso()
-    summarize_campaign(campaign)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = store.read()
+        campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+        if not campaign:
+            return
+        campaign.setdefault("results", []).append(row)
+        campaign["targetCount"] = target_count
+        campaign["status"] = "running"
+        campaign["lastProgressAt"] = now_iso()
+        summarize_campaign(campaign)
+        await store.write(data)
+
+
+async def execute_campaign_contact(campaign_id: str, body: TemplateCampaignIn, contact: dict[str, Any], target_count: int) -> None:
+    custom_fields = contact.get("customFields") or {}
+    template_params = {
+        key: custom_fields.get(field_key, contact.get(field_key, ""))
+        for key, field_key in (body.parameterMap or {}).items()
+    }
+    result = await send_sequence(
+        contact["phone"],
+        [MessageItem(
+            type="template",
+            templateName=body.templateName,
+            language=body.language,
+            templateParams=template_params,
+            phoneNumberId=body.phoneNumberId,
+        )],
+        source=f"campaign:{campaign_id}",
+    )
+    sent_message = next((msg for msg in result if msg["status"] == "sent"), None)
+    row_error = next((msg.get("error") for msg in result if msg.get("error")), None)
+    row_error_text = next((msg.get("errorText") for msg in result if msg.get("errorText")), None)
+    if not sent_message and not row_error_text:
+        row_error_text = (
+            "Envio nao foi aceito, mas a Meta nao retornou motivo. "
+            "Verifique se o template esta aprovado no idioma escolhido, se todos os parametros "
+            "obrigatorios foram preenchidos, se o telefone tem DDI e se o Phone Number ID esta correto."
+        )
+    row = {
+        "contactId": contact.get("id"),
+        "name": contact.get("name"),
+        "phone": contact.get("phone"),
+        "status": "sent" if sent_message else "failed",
+        "messageIds": [msg.get("id") for msg in result],
+        "providerMessageIds": [msg.get("providerMessageId") for msg in result if msg.get("providerMessageId")],
+        "sentAt": sent_message.get("createdAt") if sent_message else None,
+        "deliveredAt": None,
+        "readAt": None,
+        "clickedAt": None,
+        "buttonText": None,
+        "error": row_error,
+        "errorText": row_error_text,
+        "diagnostic": {
+            "campaignId": campaign_id,
+            "templateName": body.templateName,
+            "language": body.language,
+            "phoneNumberId": body.phoneNumberId or active_phone_number_id(),
+            "phone": contact.get("phone"),
+            "templateParams": template_params,
+        },
+        "createdAt": now_iso(),
+    }
+    await persist_campaign_result(campaign_id, row, target_count)
+    if body.buttonFlowMap:
+        await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
+    elif body.responseFlowId:
+        await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
+    else:
+        await set_pending_response_flow(contact["phone"], campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
 
 
 async def execute_campaign(campaign_id: str, resume: bool = False) -> None:
@@ -758,86 +828,41 @@ async def execute_campaign(campaign_id: str, resume: bool = False) -> None:
     body = TemplateCampaignIn(**campaign["config"])
     contacts = contacts_for_campaign(data, body)
     processed = campaign_processed_keys(campaign) if resume else set()
+    pending_contacts = []
+    for contact in contacts:
+        contact_keys = {("id", str(contact.get("id"))), ("phone", normalize_phone(str(contact.get("phone") or "")))}
+        if processed and contact_keys & processed:
+            continue
+        pending_contacts.append(contact)
+    batch_size = max(1, min(int(body.batchSize or 50), 200))
+    batch_pause = max(0, min(int(body.batchPauseSeconds or 0), 300))
     try:
-        for contact in contacts:
-            contact_keys = {("id", str(contact.get("id"))), ("phone", normalize_phone(str(contact.get("phone") or "")))}
-            if processed and contact_keys & processed:
-                continue
-            custom_fields = contact.get("customFields") or {}
-            template_params = {
-                key: custom_fields.get(field_key, contact.get(field_key, ""))
-                for key, field_key in (body.parameterMap or {}).items()
-            }
-            result = await send_sequence(
-                contact["phone"],
-                [MessageItem(
-                    type="template",
-                    templateName=body.templateName,
-                    language=body.language,
-                    templateParams=template_params,
-                    phoneNumberId=body.phoneNumberId,
-                )],
-                source=f"campaign:{campaign_id}",
-            )
-            sent_message = next((msg for msg in result if msg["status"] == "sent"), None)
-            row_error = next((msg.get("error") for msg in result if msg.get("error")), None)
-            row_error_text = next((msg.get("errorText") for msg in result if msg.get("errorText")), None)
-            if not sent_message and not row_error_text:
-                row_error_text = (
-                    "Envio nao foi aceito, mas a Meta nao retornou motivo. "
-                    "Verifique se o template esta aprovado no idioma escolhido, se todos os parametros "
-                    "obrigatorios foram preenchidos, se o telefone tem DDI e se o Phone Number ID esta correto."
-                )
-            row = {
-                "contactId": contact.get("id"),
-                "name": contact.get("name"),
-                "phone": contact.get("phone"),
-                "status": "sent" if sent_message else "failed",
-                "messageIds": [msg.get("id") for msg in result],
-                "providerMessageIds": [msg.get("providerMessageId") for msg in result if msg.get("providerMessageId")],
-                "sentAt": sent_message.get("createdAt") if sent_message else None,
-                "deliveredAt": None,
-                "readAt": None,
-                "clickedAt": None,
-                "buttonText": None,
-                "error": row_error,
-                "errorText": row_error_text,
-                "diagnostic": {
-                    "campaignId": campaign_id,
-                    "templateName": body.templateName,
-                    "language": body.language,
-                    "phoneNumberId": body.phoneNumberId or active_phone_number_id(),
-                    "phone": contact.get("phone"),
-                    "templateParams": template_params,
-                },
-                "createdAt": now_iso(),
-            }
-            await persist_campaign_result(campaign_id, row, len(contacts))
-            if body.buttonFlowMap:
-                await set_pending_response_flow(contact["phone"], button_flow_map=body.buttonFlowMap, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
-            elif body.responseFlowId:
-                await set_pending_response_flow(contact["phone"], response_flow_id=body.responseFlowId, campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
-            else:
-                await set_pending_response_flow(contact["phone"], campaign_id=campaign_id, phone_number_id=body.phoneNumberId)
+        for start in range(0, len(pending_contacts), batch_size):
+            batch = pending_contacts[start:start + batch_size]
+            await asyncio.gather(*(execute_campaign_contact(campaign_id, body, contact, len(contacts)) for contact in batch))
+            if batch_pause and start + batch_size < len(pending_contacts):
+                await asyncio.sleep(batch_pause)
     except Exception as exc:
+        async with STORE_MUTATION_LOCK:
+            data = store.read()
+            campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+            if campaign:
+                campaign["status"] = "failed"
+                campaign["lastErrorText"] = str(exc)
+                campaign["failedAt"] = now_iso()
+                summarize_campaign(campaign)
+                await store.write(data)
+        return
+
+    async with STORE_MUTATION_LOCK:
         data = store.read()
         campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
         if campaign:
-            campaign["status"] = "failed"
-            campaign["lastErrorText"] = str(exc)
-            campaign["failedAt"] = now_iso()
+            campaign["status"] = "done"
+            campaign["targetCount"] = len(contacts)
+            campaign["finishedAt"] = now_iso()
             summarize_campaign(campaign)
-            await store.write(data)
-        return
-
-    data = store.read()
-    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
-    if campaign:
-        campaign["status"] = "done"
-        campaign["targetCount"] = len(contacts)
-        campaign["finishedAt"] = now_iso()
-        summarize_campaign(campaign)
-    await store.write(data)
+        await store.write(data)
 
 
 async def scheduled_campaign_loop() -> None:

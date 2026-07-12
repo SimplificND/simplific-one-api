@@ -457,7 +457,7 @@ function App() {
   const [flowActions, setFlowActions] = useState([]);
   const [flowGraph, setFlowGraph] = useState(() => actionsToGraph([]));
   const [flowEditorKey, setFlowEditorKey] = useState(0);
-  const [send, setSend] = useState({ name: '', listIds: [], templateName: '', language: 'pt_BR', responseFlowId: '', exclusionListIds: [], scheduledAt: '', sendNow: true, buttonFlowMap: {}, parameterMap: {}, phoneNumberId: '' });
+  const [send, setSend] = useState({ name: '', listIds: [], templateName: '', language: 'pt_BR', responseFlowId: '', exclusionListIds: [], scheduledAt: '', sendNow: true, buttonFlowMap: {}, parameterMap: {}, phoneNumberId: '', batchSize: 50, batchPauseSeconds: 1 });
   const [replyItems, setReplyItems] = useState([]);
   const [replyText, setReplyText] = useState('');
   const [metaHydrated, setMetaHydrated] = useState(false);
@@ -909,6 +909,8 @@ function App() {
       buttonFlowMap: send.buttonFlowMap,
       parameterMap: send.parameterMap,
       phoneNumberId: send.phoneNumberId || workspacePhoneId || null,
+      batchSize: Math.max(1, Math.min(Number(send.batchSize) || 50, 200)),
+      batchPauseSeconds: Math.max(0, Math.min(Number(send.batchPauseSeconds) || 0, 300)),
       scheduledAt: send.scheduledAt || null,
       sendNow: forceNow ?? send.sendNow,
     });
@@ -1270,6 +1272,30 @@ function App() {
             <Metric icon={Tag} label="Excluídos" value={audience.excluded || 0} />
             <Metric icon={PaperPlaneTilt} label="Receberão" value={audience.receivers || 0} />
           </div>
+          <div className="subpanel">
+            <h3>Velocidade de envio</h3>
+            <div className="form-row">
+              <Field label="Lote paralelo">
+                <input
+                  type="number"
+                  min="1"
+                  max="200"
+                  value={send.batchSize}
+                  onChange={(e) => setSend({ ...send, batchSize: e.target.value })}
+                />
+              </Field>
+              <Field label="Pausa entre lotes (s)">
+                <input
+                  type="number"
+                  min="0"
+                  max="300"
+                  value={send.batchPauseSeconds}
+                  onChange={(e) => setSend({ ...send, batchPauseSeconds: e.target.value })}
+                />
+              </Field>
+            </div>
+            <p className="muted">Para números com limite alto, use lotes maiores. Padrão seguro: 50 em paralelo com 1s de pausa.</p>
+          </div>
           <div className="inline-actions"><Button onClick={() => createSend(true)} disabled={!send.name || !send.templateName}>Disparar agora</Button><Button variant="secondary" onClick={() => createSend(false)} disabled={!send.name || !send.templateName}>Salvar/agendar</Button></div>
           <div className="campaign-results">
             {campaigns.length === 0 ? <p className="muted">Nenhum envio criado ainda.</p> : campaigns.map((campaign) => (
@@ -1290,6 +1316,7 @@ function App() {
                   <span>Criado: {formatDateTime(campaign.createdAt)}</span>
                   <span>Início: {formatDateTime(campaign.startedAt || campaign.scheduledAt)}</span>
                   <span>Fim: {formatDateTime(campaign.finishedAt)}</span>
+                  <span>Lote: {campaign.config?.batchSize || 50} · pausa {campaign.config?.batchPauseSeconds ?? 1}s</span>
                 </div>
                 <div className="campaign-stats">
                   <span><b>{campaign.targetCount || 0}</b> receberiam</span>
