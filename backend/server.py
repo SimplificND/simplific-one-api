@@ -222,7 +222,7 @@ class TemplateCampaignIn(BaseModel):
     buttonFlowMap: dict[str, str] = {}
     parameterMap: dict[str, str] = {}
     phoneNumberId: Optional[str] = None
-    batchSize: int = Field(default=50, ge=1, le=100)
+    batchSize: int = Field(default=50, ge=1, le=200)
     batchPauseSeconds: int = Field(default=1, ge=0, le=300)
     sendNow: bool = True
     scheduledAt: Optional[str] = None
