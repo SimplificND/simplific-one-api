@@ -61,3 +61,15 @@ docker compose up --build
 
 Frontend: http://localhost:3000
 Backend: http://localhost:8000/api/health
+
+## Testes
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+Os testes usam dados sintéticos (não tocam produção) e sobem o próprio processo
+`uvicorn` contra um `STORAGE_DIR` temporário para simular cenários reais como
+reinício do container com campanha em andamento.
