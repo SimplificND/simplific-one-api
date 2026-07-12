@@ -36,6 +36,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def start_scheduled_workers() -> None:
     await backfill_blacklist_from_button_clicks()
+    await resume_running_campaigns_on_startup()
     asyncio.create_task(scheduled_campaign_loop())
 
 
@@ -932,6 +933,41 @@ async def execute_campaign(campaign_id: str, resume: bool = False) -> None:
             campaign["finishedAt"] = now_iso()
             summarize_campaign(campaign)
         await store.write(data)
+
+
+async def mark_campaign_resuming(campaign_id: str) -> dict[str, Any]:
+    """Shared state transition used by both the manual resume endpoint and the
+    startup auto-resume scan, so both paths behave identically."""
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        if campaign.get("status") == "canceled":
+            raise HTTPException(status_code=400, detail="Campanha cancelada")
+        campaign["status"] = "running"
+        campaign["lastResumeAt"] = now_iso()
+        campaign["lastErrorText"] = None
+        await store.write(data)
+        return campaign
+
+
+async def resume_running_campaigns_on_startup() -> None:
+    """Scan for campaigns that were left in 'running' status (e.g. the process
+    crashed or the container restarted mid-send) and resume them automatically,
+    using the exact same code path as POST /api/campaigns/{id}/resume."""
+    data = await store.read()
+    running_ids = [c["id"] for c in data.get("campaigns", []) if c.get("status") == "running"]
+    for campaign_id in running_ids:
+        try:
+            await mark_campaign_resuming(campaign_id)
+        except HTTPException as exc:
+            print(f"Skipped auto-resume for campaign {campaign_id}: {exc.detail}")
+            continue
+        asyncio.create_task(execute_campaign(campaign_id, resume=True))
+        print(f"Auto-resumed campaign {campaign_id} on startup")
+    if running_ids:
+        print(f"Startup auto-resume: found {len(running_ids)} running campaign(s)")
 
 
 async def scheduled_campaign_loop() -> None:
@@ -1961,16 +1997,7 @@ async def create_campaign(body: TemplateCampaignIn, background: BackgroundTasks)
 
 @app.post("/api/campaigns/{campaign_id}/resume")
 async def resume_campaign(campaign_id: str, background: BackgroundTasks) -> dict[str, Any]:
-    data = await store.read()
-    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.get("status") == "canceled":
-        raise HTTPException(status_code=400, detail="Campanha cancelada")
-    campaign["status"] = "running"
-    campaign["lastResumeAt"] = now_iso()
-    campaign["lastErrorText"] = None
-    await store.write(data)
+    campaign = await mark_campaign_resuming(campaign_id)
     background.add_task(execute_campaign, campaign_id, True)
     return campaign
 
