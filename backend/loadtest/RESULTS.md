@@ -48,8 +48,21 @@ migration as implemented.
 **`/api/inbox` and `/api/campaigns` did NOT improve under this specific,
 aggressive synthetic burst -- and were measurably worse than the OLD
 baseline in this run.** Measured in isolation (no concurrent burst), a
-single request to either endpoint is fast (108ms / 65ms respectively) --
-so the SQL query design itself is sound, not the root cause. The
+single request to either endpoint is fast (108ms / 65ms respectively) at
+today's data volume. `EXPLAIN QUERY PLAN` on the `/api/inbox` "latest
+message per conversation" query confirms it uses the covering index on
+`messages(conversation_id)` (not a raw table scan), but it still has to
+walk every row in the `messages` table once (4612 rows in this test) to
+compute `MAX(rowid)` per conversation -- an O(total messages) cost on
+*every single call*, independent of load. That's fine today; it will get
+slower on its own as the messages table keeps growing over months of
+production use, separate from the concurrency question below. A proper
+fix would maintain a `last_message_id` column on `conversations` updated
+incrementally on each insert (see `db_update_conversation_on_message`),
+avoiding any need to scan `messages` at read time -- not implemented here
+due to time, but a concrete, scoped follow-up.
+
+Under concurrent load, the root cause of the slowdown is separate. The
 regression only shows up under heavy concurrent access, specifically
 because these two endpoints are the ones that read from the exact tables
 (`messages`, `campaign_results`) that the concurrent bulk campaign send and
