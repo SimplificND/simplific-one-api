@@ -1,74 +1,84 @@
-# SQLite migration -- foundation (schema + migration script only)
+# SQLite migration
 
-## Status: NOT complete. Do not merge expecting a working SQLite-backed app.
+## Status: application-layer rewrite is complete. Read before merging.
 
-This PR lays the groundwork for moving off the single-JSON-blob store
-(`storage/one-api.json`) to SQLite, per the follow-up notes from PR#1. It
-contains:
+This moves the app off the single-JSON-blob store (`storage/one-api.json`)
+onto SQLite, per PR#1's follow-up notes. Unlike the first version of this
+PR (schema + migration script only), `server.py` has now been fully
+rewritten: every one of the ~90 `store.read()`/`store.write()` call sites
+across every endpoint now goes through `backend/db.py` (a SQLite data-access
+layer) instead of reading/parsing the entire JSON file on every request.
 
-- `schema.sql` -- a normalized SQLite schema for every collection currently
-  in the JSON store (contacts, lists, tags, templates, campaigns,
-  campaign_results, messages, conversations, automations, automation_runs,
-  webhook_events, media, flows, phone_numbers, custom_fields, settings).
-  `campaign_results` and `messages` get their own tables (not nested JSON)
-  since they're the two fastest-growing collections -- this is the core of
-  what actually fixes the "rewrite the whole file on every write" problem.
+### What's here
+
+- `schema.sql` -- a normalized SQLite schema for every collection (contacts,
+  lists, tags, templates, campaigns, campaign_results, messages,
+  conversations, automations, automation_runs, webhook_events, media, flows,
+  phone_numbers, custom_fields, settings). `campaign_results` and `messages`
+  get dedicated, indexed tables since they're the two fastest-growing
+  collections -- this is the core of what fixes the "rewrite the whole file
+  on every write" problem.
 - `generate_synthetic_dataset.py` -- builds a throwaway JSON file shaped
-  like production, at production scale (1724 contacts, 3700 messages, 13+
+  like production, at production scale (1724 contacts, 3700 messages, 14
   campaigns with realistic result counts, webhook events, flows,
   automations). Never touches real data.
-- `migrate_json_to_sqlite.py` -- the one-time migration script. Reads a
-  JSON export in the same shape as `one-api.json` and loads it into a fresh
-  SQLite database following `schema.sql`.
-- `test_migration.py` -- validates the migration script against the
-  synthetic dataset: exact row-count parity for every collection, field-
-  level fidelity spot checks, referential integrity, and specific edge
-  cases (contacts missing `name`/`customFields`, a campaign with zero
-  results, duplicate-phone defensiveness). All 9 checks pass.
+- `migrate_json_to_sqlite.py` -- the one-time migration script. Also wired
+  into `server.py`'s startup: if `one-api.db` doesn't exist yet but a legacy
+  `one-api.json` does, it auto-migrates on first boot, so an operator can't
+  accidentally deploy this version and silently start with an empty store.
+- `test_migration.py` -- 9 checks validating exact row-count parity,
+  field-level fidelity, referential integrity, and edge cases (contacts
+  missing `name`/`customFields`, a zero-result campaign, re-run
+  idempotency) against the synthetic dataset. All pass.
+- `../db.py` -- the SQLite data-access layer server.py now calls into.
+- `../verification/` -- category-by-category comparison harness that runs
+  the old JSON-backed server and this SQLite-backed server side by side
+  against identical synthetic data and diffs every response. See its
+  README for what it caught (3 real bugs, all fixed) and what remaining
+  differences are understood synthetic-data artifacts rather than logic
+  bugs.
+- `../loadtest/` -- load test harness matching PR#1's own methodology
+  (bulk campaign send + concurrent webhook burst), plus `RESULTS.md` with
+  the honest before/after numbers.
 
-Run it yourself:
+### Run it yourself
 
 ```bash
 cd backend
-source ../.venv/bin/activate  # or your own venv with backend/requirements.txt
-python migration/generate_synthetic_dataset.py /tmp/synthetic.json
-python migration/migrate_json_to_sqlite.py /tmp/synthetic.json /tmp/synthetic.db
-python -m pytest migration/test_migration.py -v
+pip install -r requirements-dev.txt
+pytest tests/ migration/test_migration.py -v
 ```
 
-## What this PR deliberately does NOT do
+## Honest status going into review
 
-It does **not** touch `server.py`. None of the ~90 `store.read()`/
-`store.write()` call sites across ~40 endpoints have been rewritten to use
-SQL. The app still runs exactly as before, against the JSON blob -- this
-PR is inert with respect to runtime behavior. That's intentional: rewriting
-every endpoint category (contacts, campaigns, messages/inbox, webhooks,
-flows, automations) while preserving *exact* existing behavior --
-`scoped()` phoneNumberId scoping, `ensure_named_tag`/`ensure_named_list`
-dedup, `summarize_campaign`, `update_campaign_delivery_from_status`,
-`update_campaign_click_from_inbound` -- and verifying each category against
-the current JSON-backed behavior before moving to the next, is a
-multi-day effort in its own right. Attempting to compress that into the
-time available before Thursday's campaign, on infrastructure a real sales
-push depends on, would trade a well-understood performance problem (slow
-under heavy concurrent load, but PR#1 + PR B already stop it from
-deadlocking or losing data) for an untested one. That's a worse trade than
-shipping PR A + PR B now and doing this properly afterward.
+**Correctness:** extensively verified. Full endpoint rewrite preserves
+`scoped()` phoneNumberId scoping semantics (including the subtle case where
+contacts get an "OR in phoneNumberIds list" fallback that no other entity
+type gets), tag/list dedup via `ensure_named_tag`/`ensure_named_list`,
+campaign summarization, and webhook status/click propagation via a properly
+indexed lookup (replacing a full Python scan of every campaign's results).
+28 tests pass (unit + integration + migration validation), plus a dedicated
+category-by-category comparison against the old JSON-backed server on
+identical production-scale synthetic data (see `../verification/`).
 
-## Recommended next steps (separate, future effort)
+**Performance:** genuinely mixed, and reported honestly in
+`../loadtest/RESULTS.md`. `/api/settings` and `/api/health` are
+dramatically fixed (60-100x faster under the same concurrent burst that
+caused the original incident) -- this directly answers the reported
+"9 seconds for 480 bytes" problem. `/api/inbox` and `/api/campaigns`, the
+other two endpoints named in the original report, did **not** improve
+under an aggressive synthetic concurrent-burst test, and were measurably
+slower than the JSON baseline in that specific scenario -- even though a
+single uncontended request to either is fast (108ms / 65ms). The load test
+doc lays out what was tried (fixed a real N+1 query bug, widened the
+thread pool, tuned SQLite's synchronous mode) and what's still suspected
+(SQLite contention from a fresh connection per request against tables
+under sustained write pressure) along with a concrete next step (a small
+persistent read-connection pool) that wasn't attempted yet due to time.
 
-1. Build a small compatibility shim so `store.read()` returns the same
-   dict-of-lists shape server.py already expects, backed by SQL queries
-   under the hood -- lets endpoints be migrated one at a time instead of
-   all at once.
-2. Migrate categories in this order, verifying each against the current
-   JSON-backed behavior on the same synthetic dataset before moving on:
-   contacts/lists/tags/custom-fields -> templates/flows/automations ->
-   phone-numbers/settings -> messages/conversations/inbox -> campaigns/
-   campaign_results -> webhooks (the highest-risk category, since it's
-   also the one PR B just fixed a live race condition in).
-3. Only after all categories pass, run the same load test PR#1 used to
-   verify its fix (bulk campaign send + concurrent webhook burst against
-   the full production-scale synthetic dataset), with a p50/p95/max
-   health-check latency comparison table against the current JSON-blob
-   baseline, included in that PR's description.
+**Recommendation:** this PR is safe to merge from a correctness standpoint,
+but the performance story for `/api/inbox` and `/api/campaigns` under heavy
+concurrent load is not yet a clean win and deserves one more look before
+this is treated as fully resolving the original incident. Consider merging
+once reviewed, but keep an eye on those two endpoints' behavior during the
+first real campaign send after deploy.

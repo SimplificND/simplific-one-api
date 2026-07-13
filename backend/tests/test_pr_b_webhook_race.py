@@ -14,10 +14,13 @@ receipts arriving together during a real campaign send), and asserts every
 single one of them landed. Before the fix, this reliably lost updates under
 concurrency; after the fix (wrapping the read-modify-write in
 STORE_MUTATION_LOCK), none are lost.
+
+Updated for PR C (SQLite migration): the store is now backed by SQLite
+instead of a JSON blob, so seeding/verification goes through server.db_run
+and server.db_module instead of the old server.store/server.JsonStore.
 """
 import asyncio
 import importlib
-import json
 import sys
 from pathlib import Path
 
@@ -32,14 +35,15 @@ def load_server(storage_dir: Path):
     """Import a fresh copy of server.py bound to an isolated storage dir.
 
     We reload the module per-test (rather than relying on env vars at import
-    time) so each test gets its own JsonStore/STORE_MUTATION_LOCK instance.
+    time) so each test gets its own SQLite database / STORE_MUTATION_LOCK.
     """
     import os
     os.environ["STORAGE_DIR"] = str(storage_dir)
     os.environ.pop("META_ACCESS_TOKEN", None)
     os.environ.pop("META_PHONE_NUMBER_ID", None)
-    if "server" in sys.modules:
-        del sys.modules["server"]
+    for mod in ("server", "db"):
+        if mod in sys.modules:
+            del sys.modules[mod]
     return importlib.import_module("server")
 
 
@@ -61,6 +65,22 @@ def webhook_status_payload(provider_message_id: str, status: str) -> dict:
     }
 
 
+def _seed_campaign_with_results_tx(conn, server, campaign_id: str, n: int) -> None:
+    server.db_module.db_create_campaign(conn, {
+        "id": campaign_id, "name": "race test", "config": {}, "status": "running",
+        "createdAt": "2026-07-01T00:00:00+00:00",
+    })
+    for i in range(n):
+        server.db_module.db_insert_campaign_result(conn, campaign_id, {
+            "contactId": f"lead_{i}",
+            "phone": f"5511900000{i:03d}",
+            "status": "sent",
+            "providerMessageIds": [f"wamid.TEST{i:04d}"],
+            "sentAt": "2026-07-01T00:00:00+00:00",
+            "createdAt": "2026-07-01T00:00:00+00:00",
+        })
+
+
 @pytest.mark.asyncio
 async def test_concurrent_webhook_status_updates_all_land(tmp_path):
     server = load_server(tmp_path / "storage")
@@ -71,29 +91,7 @@ async def test_concurrent_webhook_status_updates_all_land(tmp_path):
 
     # Seed a campaign with N result rows, each tied to a distinct provider
     # message id, all initially unacknowledged (no deliveredAt).
-    data = server.JsonStore.empty()
-    data["campaigns"].append({
-        "id": campaign_id,
-        "name": "race test",
-        "results": [
-            {
-                "contactId": f"lead_{i}",
-                "phone": f"5511900000{i:03d}",
-                "status": "sent",
-                "providerMessageIds": [provider_ids[i]],
-                "sentAt": "2026-07-01T00:00:00+00:00",
-                "deliveredAt": None,
-                "readAt": None,
-                "clickedAt": None,
-                "error": None,
-                "errorText": None,
-            }
-            for i in range(n)
-        ],
-        "status": "running",
-        "createdAt": "2026-07-01T00:00:00+00:00",
-    })
-    await server.store.write(data)
+    await server.db_run(_seed_campaign_with_results_tx, server, campaign_id, n)
 
     async def fire(i: int):
         payload = webhook_status_payload(provider_ids[i], "delivered")
@@ -110,8 +108,7 @@ async def test_concurrent_webhook_status_updates_all_land(tmp_path):
 
     await asyncio.gather(*(fire(i) for i in range(n)))
 
-    final = await server.store.read()
-    campaign = next(c for c in final["campaigns"] if c["id"] == campaign_id)
+    campaign = await server.db_run(server.db_module.db_get_campaign, campaign_id, True)
     delivered_count = sum(1 for row in campaign["results"] if row.get("deliveredAt"))
     missing = [row["contactId"] for row in campaign["results"] if not row.get("deliveredAt")]
 
@@ -119,9 +116,10 @@ async def test_concurrent_webhook_status_updates_all_land(tmp_path):
         f"lost updates under concurrency: only {delivered_count}/{n} delivery statuses landed, "
         f"missing: {missing}"
     )
-    # Also check no webhook events were dropped (webhookEvents collection
-    # appended-to concurrently by the same handler).
-    assert len(final["webhookEvents"]) == n
+    # Also check no webhook events were dropped (webhook_events table
+    # inserted-into concurrently by the same handler).
+    event_count = await server.db_run(server.db_module.db_count_webhook_events)
+    assert event_count == n
 
 
 @pytest.mark.asyncio
@@ -138,14 +136,14 @@ async def test_concurrent_tag_creation_no_lost_updates(tmp_path):
 
     await asyncio.gather(*(create(i) for i in range(n)))
 
-    data = await server.store.read()
-    assert len(data["tags"]) == n, f"expected {n} tags, found {len(data['tags'])} -- lost updates"
+    tags = await server.db_run(server.db_module.db_list_tags, None)
+    assert len(tags) == n, f"expected {n} tags, found {len(tags)} -- lost updates"
 
 
 @pytest.mark.asyncio
 async def test_concurrent_contact_creation_across_different_contacts(tmp_path):
     """Concurrent contact creation (different phone numbers) must not drop
-    any contact due to a lost-update race on the shared JSON blob."""
+    any contact due to a lost-update race on the shared store."""
     server = load_server(tmp_path / "storage")
     n = 50
 
@@ -155,5 +153,5 @@ async def test_concurrent_contact_creation_across_different_contacts(tmp_path):
 
     await asyncio.gather(*(create(i) for i in range(n)))
 
-    data = await server.store.read()
-    assert len(data["contacts"]) == n, f"expected {n} contacts, found {len(data['contacts'])} -- lost updates"
+    contacts = await server.db_run(server.db_module.db_list_contacts, None)
+    assert len(contacts) == n, f"expected {n} contacts, found {len(contacts)} -- lost updates"
