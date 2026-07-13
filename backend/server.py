@@ -36,6 +36,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def start_scheduled_workers() -> None:
     await backfill_blacklist_from_button_clicks()
+    await resume_running_campaigns_on_startup()
     asyncio.create_task(scheduled_campaign_loop())
 
 
@@ -665,31 +666,32 @@ def is_blacklist_button_text(value: str) -> bool:
 
 
 async def backfill_blacklist_from_button_clicks() -> None:
-    data = await store.read()
-    changed = 0
-    for message in data.get("messages", []):
-        if message.get("direction") != "in" or not is_blacklist_button_text(inbound_button_text(message)):
-            continue
-        contact = next(
-            (
-                row
-                for row in data["contacts"]
-                if row.get("id") == message.get("contactId")
-                or row.get("phone") == normalize_phone(str(message.get("phone") or ""))
-            ),
-            None,
-        )
-        if not contact:
-            continue
-        channel_id = message.get("phoneNumberId") or contact.get("lastPhoneNumberId")
-        blacklist_id = ensure_named_list(data, "Blacklist", channel_id)
-        before = set(contact.get("lists") or [])
-        attach_labels(contact, [], [blacklist_id])
-        if set(contact.get("lists") or []) != before:
-            changed += 1
-    if changed:
-        await store.write(data)
-        print(f"Applied Blacklist backfill to {changed} contacts")
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        changed = 0
+        for message in data.get("messages", []):
+            if message.get("direction") != "in" or not is_blacklist_button_text(inbound_button_text(message)):
+                continue
+            contact = next(
+                (
+                    row
+                    for row in data["contacts"]
+                    if row.get("id") == message.get("contactId")
+                    or row.get("phone") == normalize_phone(str(message.get("phone") or ""))
+                ),
+                None,
+            )
+            if not contact:
+                continue
+            channel_id = message.get("phoneNumberId") or contact.get("lastPhoneNumberId")
+            blacklist_id = ensure_named_list(data, "Blacklist", channel_id)
+            before = set(contact.get("lists") or [])
+            attach_labels(contact, [], [blacklist_id])
+            if set(contact.get("lists") or []) != before:
+                changed += 1
+        if changed:
+            await store.write(data)
+            print(f"Applied Blacklist backfill to {changed} contacts")
 
 
 async def run_flow_for_contact(phone: str, flow_id: str, source: str = "flow") -> dict[str, Any]:
@@ -701,19 +703,39 @@ async def run_flow_for_contact(phone: str, flow_id: str, source: str = "flow") -
     contact = upsert_contact(data, phone, phone_number_id=flow_phone_number_id)
     flow_phone_number_id = flow_phone_number_id or contact.get("lastPhoneNumberId") or await active_phone_number_id(data)
     sent_items: list[MessageItem] = []
+    tag_names: list[str] = []
+    list_names: list[str] = []
+    # This pass only builds the plan (which tags/lists to add, which messages
+    # to queue) and executes any configured delays between steps. It never
+    # held the store lock even before this fix (delaySeconds can be up to
+    # 24h per FlowAction) -- the actual write always happened once, at the
+    # very end, after all delays. We keep that property, but re-read fresh
+    # state right before the write (below) so a long delay here can't clobber
+    # a concurrent update made to this contact in the meantime.
     for action in flow.get("actions") or []:
         action_type = action.get("type")
         if action_type == "delay":
             await asyncio.sleep(int(action.get("delaySeconds") or 0))
         elif action_type == "add_tags":
-            attach_labels(contact, resolve_tag_ids(data, action.get("tags") or [], flow_phone_number_id), [])
+            tag_names.extend(action.get("tags") or [])
         elif action_type == "add_lists":
-            attach_labels(contact, [], resolve_list_ids(data, action.get("lists") or [], flow_phone_number_id))
+            list_names.extend(action.get("lists") or [])
         elif action_type == "send_message":
             sent_items.append(MessageItem(type="text", text=action.get("text"), phoneNumberId=flow_phone_number_id, delaySeconds=int(action.get("delaySeconds") or 0)))
         elif action_type in {"image", "video", "audio", "document"}:
             sent_items.append(MessageItem(type=action_type, mediaUrl=action.get("mediaUrl"), caption=action.get("caption"), phoneNumberId=flow_phone_number_id, delaySeconds=int(action.get("delaySeconds") or 0)))
-    await store.write(data)
+
+    if tag_names or list_names:
+        async with STORE_MUTATION_LOCK:
+            data = await store.read()
+            contact = upsert_contact(data, phone, phone_number_id=flow_phone_number_id)
+            attach_labels(
+                contact,
+                resolve_tag_ids(data, tag_names, flow_phone_number_id) if tag_names else [],
+                resolve_list_ids(data, list_names, flow_phone_number_id) if list_names else [],
+            )
+            await store.write(data)
+
     results = await send_sequence(phone, sent_items, source=source) if sent_items else []
     return {"flowId": flow_id, "messages": len(results)}
 
@@ -879,16 +901,17 @@ async def persist_campaign_batch(campaign_id: str, body: TemplateCampaignIn, res
 
 
 async def execute_campaign(campaign_id: str, resume: bool = False) -> None:
-    data = await store.read()
-    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
-    if not campaign:
-        return
-    campaign["status"] = "running"
-    campaign["startedAt"] = campaign.get("startedAt") or now_iso()
-    campaign["lastProgressAt"] = now_iso()
-    campaign.setdefault("results", [])
-    summarize_campaign(campaign)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+        if not campaign:
+            return
+        campaign["status"] = "running"
+        campaign["startedAt"] = campaign.get("startedAt") or now_iso()
+        campaign["lastProgressAt"] = now_iso()
+        campaign.setdefault("results", [])
+        summarize_campaign(campaign)
+        await store.write(data)
 
     body = TemplateCampaignIn(**campaign["config"])
     contacts = contacts_for_campaign(data, body)
@@ -934,6 +957,41 @@ async def execute_campaign(campaign_id: str, resume: bool = False) -> None:
         await store.write(data)
 
 
+async def mark_campaign_resuming(campaign_id: str) -> dict[str, Any]:
+    """Shared state transition used by both the manual resume endpoint and the
+    startup auto-resume scan, so both paths behave identically."""
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        if campaign.get("status") == "canceled":
+            raise HTTPException(status_code=400, detail="Campanha cancelada")
+        campaign["status"] = "running"
+        campaign["lastResumeAt"] = now_iso()
+        campaign["lastErrorText"] = None
+        await store.write(data)
+        return campaign
+
+
+async def resume_running_campaigns_on_startup() -> None:
+    """Scan for campaigns that were left in 'running' status (e.g. the process
+    crashed or the container restarted mid-send) and resume them automatically,
+    using the exact same code path as POST /api/campaigns/{id}/resume."""
+    data = await store.read()
+    running_ids = [c["id"] for c in data.get("campaigns", []) if c.get("status") == "running"]
+    for campaign_id in running_ids:
+        try:
+            await mark_campaign_resuming(campaign_id)
+        except HTTPException as exc:
+            print(f"Skipped auto-resume for campaign {campaign_id}: {exc.detail}")
+            continue
+        asyncio.create_task(execute_campaign(campaign_id, resume=True))
+        print(f"Auto-resumed campaign {campaign_id} on startup")
+    if running_ids:
+        print(f"Startup auto-resume: found {len(running_ids)} running campaign(s)")
+
+
 async def scheduled_campaign_loop() -> None:
     while True:
         try:
@@ -969,40 +1027,56 @@ def automation_matches(automation: dict[str, Any], inbound: dict[str, Any]) -> b
 
 
 async def run_matching_automations(phone: str, inbound: dict[str, Any]) -> None:
-    data = await store.read()
     channel_id = inbound.get("phoneNumberId")
-    contact = upsert_contact(data, phone, inbound.get("name"), channel_id)
-    button_text = str(inbound.get("buttonText") or inbound.get("text") or "").strip()
-    pending_map = contact.get("pendingResponseFlows") or {}
-    pending_flow = pending_map.get(button_text) or contact.get("pendingResponseFlowId")
-    if pending_flow:
-        contact["pendingResponseFlowId"] = None
-        if pending_map:
-            contact["pendingResponseFlows"] = {}
-        await store.write(data)
-        await run_flow_for_contact(contact["phone"], pending_flow, source=f"button-flow:{pending_flow}")
+
+    pending_flow = None
+    async with STORE_MUTATION_LOCK:
         data = await store.read()
         contact = upsert_contact(data, phone, inbound.get("name"), channel_id)
-    matches = [a for a in data["automations"] if scoped(a, channel_id) and automation_matches(a, inbound)]
-    for automation in matches:
-        attach_labels(
-            contact,
-            resolve_tag_ids(data, automation.get("addTags") or [], channel_id),
-            resolve_list_ids(data, automation.get("addLists") or [], channel_id),
-        )
-        data["automationRuns"].append({
-            "id": new_id("run"),
-            "automationId": automation["id"],
-            "contactId": contact["id"],
-            "phone": contact["phone"],
-            "trigger": inbound,
-            "createdAt": now_iso(),
-        })
-        await store.write(data)
-        items = [MessageItem(**item) for item in automation.get("items") or []]
-        if items:
-            await send_sequence(contact["phone"], items, source=f"automation:{automation['id']}")
+        button_text = str(inbound.get("buttonText") or inbound.get("text") or "").strip()
+        pending_map = contact.get("pendingResponseFlows") or {}
+        pending_flow = pending_map.get(button_text) or contact.get("pendingResponseFlowId")
+        if pending_flow:
+            contact["pendingResponseFlowId"] = None
+            if pending_map:
+                contact["pendingResponseFlows"] = {}
+            await store.write(data)
+
+    if pending_flow:
+        # run_flow_for_contact acquires STORE_MUTATION_LOCK itself -- must not
+        # be called while we're already holding it (asyncio.Lock isn't
+        # reentrant, that would deadlock).
+        await run_flow_for_contact(phone, pending_flow, source=f"button-flow:{pending_flow}")
+
+    pending_sends: list[tuple[str, list[MessageItem]]] = []
+    async with STORE_MUTATION_LOCK:
         data = await store.read()
+        contact = upsert_contact(data, phone, inbound.get("name"), channel_id)
+        matches = [a for a in data["automations"] if scoped(a, channel_id) and automation_matches(a, inbound)]
+        for automation in matches:
+            attach_labels(
+                contact,
+                resolve_tag_ids(data, automation.get("addTags") or [], channel_id),
+                resolve_list_ids(data, automation.get("addLists") or [], channel_id),
+            )
+            data["automationRuns"].append({
+                "id": new_id("run"),
+                "automationId": automation["id"],
+                "contactId": contact["id"],
+                "phone": contact["phone"],
+                "trigger": inbound,
+                "createdAt": now_iso(),
+            })
+            items = [MessageItem(**item) for item in automation.get("items") or []]
+            if items:
+                pending_sends.append((automation["id"], items))
+        if matches:
+            await store.write(data)
+
+    for automation_id, items in pending_sends:
+        # send_sequence also acquires STORE_MUTATION_LOCK itself -- called
+        # here, after the block above has released it.
+        await send_sequence(contact["phone"], items, source=f"automation:{automation_id}")
 
 
 def extract_webhook_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1229,38 +1303,39 @@ async def verify_webhook(
 @app.post("/api/meta/webhook")
 async def receive_webhook(request: Request, background: BackgroundTasks) -> dict[str, Any]:
     payload = await request.json()
-    data = await store.read()
-    data["webhookEvents"].append({"id": new_id("evt"), "payload": payload, "createdAt": now_iso()})
     inbound_messages = extract_webhook_messages(payload)
     delivery_statuses = extract_webhook_statuses(payload)
-    for status in delivery_statuses:
-        update_campaign_delivery_from_status(data, status)
-    for inbound in inbound_messages:
-        channel_id = inbound.get("phoneNumberId")
-        contact = upsert_contact(data, inbound["phone"], inbound.get("name"), channel_id)
-        convo = conversation_for(data, contact["phone"], contact.get("name"), channel_id)
-        if channel_id:
-            convo["phoneNumberId"] = channel_id
-            convo["displayPhoneNumber"] = inbound.get("displayPhoneNumber")
-        convo["unread"] = int(convo.get("unread") or 0) + 1
-        convo["lastMessageAt"] = inbound["createdAt"]
-        convo["lastInboundAt"] = inbound["createdAt"]
-        data["messages"].append({
-            "id": new_id("msg"),
-            "conversationId": convo["id"],
-            "contactId": contact["id"],
-            "phone": contact["phone"],
-            "phoneNumberId": channel_id,
-            "displayPhoneNumber": inbound.get("displayPhoneNumber"),
-            "direction": "in",
-            "type": inbound.get("type"),
-            "text": inbound.get("text"),
-            "payload": inbound.get("payload"),
-            "status": "received",
-            "createdAt": inbound["createdAt"],
-        })
-        update_campaign_click_from_inbound(data, inbound)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        data["webhookEvents"].append({"id": new_id("evt"), "payload": payload, "createdAt": now_iso()})
+        for status in delivery_statuses:
+            update_campaign_delivery_from_status(data, status)
+        for inbound in inbound_messages:
+            channel_id = inbound.get("phoneNumberId")
+            contact = upsert_contact(data, inbound["phone"], inbound.get("name"), channel_id)
+            convo = conversation_for(data, contact["phone"], contact.get("name"), channel_id)
+            if channel_id:
+                convo["phoneNumberId"] = channel_id
+                convo["displayPhoneNumber"] = inbound.get("displayPhoneNumber")
+            convo["unread"] = int(convo.get("unread") or 0) + 1
+            convo["lastMessageAt"] = inbound["createdAt"]
+            convo["lastInboundAt"] = inbound["createdAt"]
+            data["messages"].append({
+                "id": new_id("msg"),
+                "conversationId": convo["id"],
+                "contactId": contact["id"],
+                "phone": contact["phone"],
+                "phoneNumberId": channel_id,
+                "displayPhoneNumber": inbound.get("displayPhoneNumber"),
+                "direction": "in",
+                "type": inbound.get("type"),
+                "text": inbound.get("text"),
+                "payload": inbound.get("payload"),
+                "status": "received",
+                "createdAt": inbound["createdAt"],
+            })
+            update_campaign_click_from_inbound(data, inbound)
+        await store.write(data)
     for inbound in inbound_messages:
         background.add_task(run_matching_automations, inbound["phone"], inbound)
     return {"received": True, "time": now_iso(), "messages": len(inbound_messages), "statuses": len(delivery_statuses)}
@@ -1278,14 +1353,15 @@ async def settings() -> dict[str, Any]:
 
 @app.post("/api/meta/settings")
 async def save_meta_settings(body: MetaSettingsIn) -> dict[str, Any]:
-    data = await store.read()
-    current = data.setdefault("settings", {}).setdefault("meta", {})
-    update = body.model_dump()
-    if not update.get("accessToken"):
-        update.pop("accessToken", None)
-    current.update({k: v for k, v in update.items() if v not in (None, "")})
-    current["updatedAt"] = now_iso()
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        current = data.setdefault("settings", {}).setdefault("meta", {})
+        update = body.model_dump()
+        if not update.get("accessToken"):
+            update.pop("accessToken", None)
+        current.update({k: v for k, v in update.items() if v not in (None, "")})
+        current["updatedAt"] = now_iso()
+        await store.write(data)
     return {"saved": True, "metaConfigured": await configured_meta()}
 
 
@@ -1301,33 +1377,34 @@ async def sync_meta_templates() -> dict[str, Any]:
     if res.status_code >= 400:
         raise HTTPException(res.status_code, res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text)
     payload = res.json()
-    data = await store.read()
-    synced = []
-    channel_id = await active_phone_number_id(data)
-    for tpl in payload.get("data", []) or []:
-        body_preview = ""
-        for component in tpl.get("components", []) or []:
-            if component.get("type") == "BODY":
-                body_preview = component.get("text") or ""
-        doc = {
-            "id": f"meta_tpl_{channel_id or 'global'}_{tpl.get('name')}_{tpl.get('language')}",
-            "name": tpl.get("name"),
-            "language": tpl.get("language"),
-            "status": tpl.get("status"),
-            "category": tpl.get("category"),
-            "bodyPreview": body_preview,
-            "components": tpl.get("components") or [],
-            "phoneNumberId": channel_id or None,
-            "source": "meta",
-            "syncedAt": now_iso(),
-        }
-        existing = next((t for t in data["templates"] if t["id"] == doc["id"]), None)
-        if existing:
-            existing.update(doc)
-        else:
-            data["templates"].append(doc)
-        synced.append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        synced = []
+        channel_id = await active_phone_number_id(data)
+        for tpl in payload.get("data", []) or []:
+            body_preview = ""
+            for component in tpl.get("components", []) or []:
+                if component.get("type") == "BODY":
+                    body_preview = component.get("text") or ""
+            doc = {
+                "id": f"meta_tpl_{channel_id or 'global'}_{tpl.get('name')}_{tpl.get('language')}",
+                "name": tpl.get("name"),
+                "language": tpl.get("language"),
+                "status": tpl.get("status"),
+                "category": tpl.get("category"),
+                "bodyPreview": body_preview,
+                "components": tpl.get("components") or [],
+                "phoneNumberId": channel_id or None,
+                "source": "meta",
+                "syncedAt": now_iso(),
+            }
+            existing = next((t for t in data["templates"] if t["id"] == doc["id"]), None)
+            if existing:
+                existing.update(doc)
+            else:
+                data["templates"].append(doc)
+            synced.append(doc)
+        await store.write(data)
     return {"count": len(synced), "templates": synced}
 
 
@@ -1354,20 +1431,21 @@ async def subscribe_webhook() -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=45) as client:
         res = await client.post(url, headers={"Authorization": f"Bearer {cfg['accessToken']}"})
     response_payload: Any = res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text
-    data = await store.read()
-    meta = data.setdefault("settings", {}).setdefault("meta", {})
-    if res.status_code >= 400:
-        meta["webhookSubscribed"] = False
-        meta["lastWebhookSubscribeError"] = response_payload
-        meta["lastWebhookSubscribeErrorText"] = readable_error(response_payload) or str(response_payload)
-        meta["lastWebhookSubscribeErrorAt"] = now_iso()
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        meta = data.setdefault("settings", {}).setdefault("meta", {})
+        if res.status_code >= 400:
+            meta["webhookSubscribed"] = False
+            meta["lastWebhookSubscribeError"] = response_payload
+            meta["lastWebhookSubscribeErrorText"] = readable_error(response_payload) or str(response_payload)
+            meta["lastWebhookSubscribeErrorAt"] = now_iso()
+            await store.write(data)
+            raise HTTPException(res.status_code, response_payload)
+        meta["webhookSubscribed"] = True
+        meta["webhookSubscribedAt"] = now_iso()
+        meta["lastWebhookSubscribeError"] = None
+        meta["lastWebhookSubscribeErrorText"] = None
         await store.write(data)
-        raise HTTPException(res.status_code, response_payload)
-    meta["webhookSubscribed"] = True
-    meta["webhookSubscribedAt"] = now_iso()
-    meta["lastWebhookSubscribeError"] = None
-    meta["lastWebhookSubscribeErrorText"] = None
-    await store.write(data)
     return {"subscribed": True, "response": response_payload}
 
 
@@ -1392,24 +1470,25 @@ async def list_phone_numbers() -> list[dict[str, Any]]:
 
 @app.post("/api/phone-numbers")
 async def add_phone_number(body: PhoneNumberManualIn) -> dict[str, Any]:
-    data = await store.read()
-    doc = {
-        "id": body.phoneNumberId,
-        "phoneNumberId": body.phoneNumberId,
-        "displayPhoneNumber": body.displayPhoneNumber,
-        "verifiedName": body.verifiedName,
-        "qualityRating": body.qualityRating or "UNKNOWN",
-        "messagingLimitTier": body.messagingLimitTier or "UNKNOWN",
-        "active": not data["phoneNumbers"],
-        "source": "manual",
-        "createdAt": now_iso(),
-    }
-    existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == body.phoneNumberId), None)
-    if existing:
-        existing.update(doc)
-    else:
-        data["phoneNumbers"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        doc = {
+            "id": body.phoneNumberId,
+            "phoneNumberId": body.phoneNumberId,
+            "displayPhoneNumber": body.displayPhoneNumber,
+            "verifiedName": body.verifiedName,
+            "qualityRating": body.qualityRating or "UNKNOWN",
+            "messagingLimitTier": body.messagingLimitTier or "UNKNOWN",
+            "active": not data["phoneNumbers"],
+            "source": "manual",
+            "createdAt": now_iso(),
+        }
+        existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == body.phoneNumberId), None)
+        if existing:
+            existing.update(doc)
+        else:
+            data["phoneNumbers"].append(doc)
+        await store.write(data)
     return doc
 
 
@@ -1425,30 +1504,31 @@ async def sync_phone_numbers() -> dict[str, Any]:
     if res.status_code >= 400:
         raise HTTPException(res.status_code, res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text)
     payload = res.json()
-    data = await store.read()
-    synced = []
-    active_id = await active_phone_number_id(data)
-    for row in payload.get("data", []) or []:
-        doc = {
-            "id": row.get("id"),
-            "phoneNumberId": row.get("id"),
-            "displayPhoneNumber": row.get("display_phone_number"),
-            "verifiedName": row.get("verified_name"),
-            "qualityRating": row.get("quality_rating") or "UNKNOWN",
-            "messagingLimitTier": row.get("messaging_limit_tier") or "UNKNOWN",
-            "codeVerificationStatus": row.get("code_verification_status"),
-            "nameStatus": row.get("name_status"),
-            "active": row.get("id") == active_id,
-            "source": "meta",
-            "syncedAt": now_iso(),
-        }
-        existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == row.get("id")), None)
-        if existing:
-            existing.update(doc)
-        else:
-            data["phoneNumbers"].append(doc)
-        synced.append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        synced = []
+        active_id = await active_phone_number_id(data)
+        for row in payload.get("data", []) or []:
+            doc = {
+                "id": row.get("id"),
+                "phoneNumberId": row.get("id"),
+                "displayPhoneNumber": row.get("display_phone_number"),
+                "verifiedName": row.get("verified_name"),
+                "qualityRating": row.get("quality_rating") or "UNKNOWN",
+                "messagingLimitTier": row.get("messaging_limit_tier") or "UNKNOWN",
+                "codeVerificationStatus": row.get("code_verification_status"),
+                "nameStatus": row.get("name_status"),
+                "active": row.get("id") == active_id,
+                "source": "meta",
+                "syncedAt": now_iso(),
+            }
+            existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == row.get("id")), None)
+            if existing:
+                existing.update(doc)
+            else:
+                data["phoneNumbers"].append(doc)
+            synced.append(doc)
+        await store.write(data)
     return {"count": len(synced), "phoneNumbers": synced}
 
 
@@ -1464,29 +1544,30 @@ async def refresh_phone_number(phone_number_id: str) -> dict[str, Any]:
     if res.status_code >= 400:
         raise HTTPException(res.status_code, res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text)
     row = res.json()
-    data = await store.read()
-    existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == phone_number_id), None)
-    if not existing:
-        existing = {
-            "id": phone_number_id,
-            "phoneNumberId": phone_number_id,
-            "active": data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id,
-            "source": "meta",
-            "createdAt": now_iso(),
-        }
-        data["phoneNumbers"].append(existing)
-    existing.update({
-        "id": row.get("id") or phone_number_id,
-        "phoneNumberId": row.get("id") or phone_number_id,
-        "displayPhoneNumber": row.get("display_phone_number") or existing.get("displayPhoneNumber"),
-        "verifiedName": row.get("verified_name") or existing.get("verifiedName"),
-        "qualityRating": row.get("quality_rating") or "UNKNOWN",
-        "messagingLimitTier": row.get("messaging_limit_tier") or "UNKNOWN",
-        "codeVerificationStatus": row.get("code_verification_status"),
-        "nameStatus": row.get("name_status"),
-        "refreshedAt": now_iso(),
-    })
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == phone_number_id), None)
+        if not existing:
+            existing = {
+                "id": phone_number_id,
+                "phoneNumberId": phone_number_id,
+                "active": data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id,
+                "source": "meta",
+                "createdAt": now_iso(),
+            }
+            data["phoneNumbers"].append(existing)
+        existing.update({
+            "id": row.get("id") or phone_number_id,
+            "phoneNumberId": row.get("id") or phone_number_id,
+            "displayPhoneNumber": row.get("display_phone_number") or existing.get("displayPhoneNumber"),
+            "verifiedName": row.get("verified_name") or existing.get("verifiedName"),
+            "qualityRating": row.get("quality_rating") or "UNKNOWN",
+            "messagingLimitTier": row.get("messaging_limit_tier") or "UNKNOWN",
+            "codeVerificationStatus": row.get("code_verification_status"),
+            "nameStatus": row.get("name_status"),
+            "refreshedAt": now_iso(),
+        })
+        await store.write(data)
     return existing
 
 
@@ -1510,64 +1591,67 @@ async def register_phone_number(phone_number_id: str, body: PhoneNumberRegisterI
     else:
         response_payload = res.text
 
-    data = await store.read()
-    existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == phone_number_id), None)
-    if not existing:
-        existing = {
-            "id": phone_number_id,
-            "phoneNumberId": phone_number_id,
-            "active": data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id,
-            "source": "meta",
-            "createdAt": now_iso(),
-        }
-        data["phoneNumbers"].append(existing)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        existing = next((p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) == phone_number_id), None)
+        if not existing:
+            existing = {
+                "id": phone_number_id,
+                "phoneNumberId": phone_number_id,
+                "active": data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id,
+                "source": "meta",
+                "createdAt": now_iso(),
+            }
+            data["phoneNumbers"].append(existing)
 
-    if res.status_code >= 400:
+        if res.status_code >= 400:
+            existing.update({
+                "registrationStatus": "failed",
+                "registered": False,
+                "lastRegistrationError": response_payload,
+                "lastRegistrationErrorText": readable_error(response_payload) or str(response_payload),
+                "lastRegistrationErrorAt": now_iso(),
+            })
+            await store.write(data)
+            raise HTTPException(res.status_code, response_payload)
+
         existing.update({
-            "registrationStatus": "failed",
-            "registered": False,
-            "lastRegistrationError": response_payload,
-            "lastRegistrationErrorText": readable_error(response_payload) or str(response_payload),
-            "lastRegistrationErrorAt": now_iso(),
+            "registrationStatus": "registered",
+            "registered": True,
+            "registeredAt": now_iso(),
+            "lastRegistrationResponse": response_payload,
+            "lastRegistrationError": None,
+            "lastRegistrationErrorText": None,
         })
         await store.write(data)
-        raise HTTPException(res.status_code, response_payload)
-
-    existing.update({
-        "registrationStatus": "registered",
-        "registered": True,
-        "registeredAt": now_iso(),
-        "lastRegistrationResponse": response_payload,
-        "lastRegistrationError": None,
-        "lastRegistrationErrorText": None,
-    })
-    await store.write(data)
     return {"registered": True, "phoneNumber": existing, "response": response_payload}
 
 
 @app.post("/api/phone-numbers/{phone_number_id}/activate")
 async def activate_phone_number(phone_number_id: str) -> dict[str, Any]:
-    data = await store.read()
-    found = False
-    for phone in data["phoneNumbers"]:
-        is_active = (phone.get("phoneNumberId") or phone.get("id")) == phone_number_id
-        phone["active"] = is_active
-        found = found or is_active
-    if not found:
-        raise HTTPException(404, "Número não encontrado")
-    data.setdefault("settings", {}).setdefault("meta", {})["phoneNumberId"] = phone_number_id
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        found = False
+        for phone in data["phoneNumbers"]:
+            is_active = (phone.get("phoneNumberId") or phone.get("id")) == phone_number_id
+            phone["active"] = is_active
+            found = found or is_active
+        if not found:
+            raise HTTPException(404, "Número não encontrado")
+        data.setdefault("settings", {}).setdefault("meta", {})["phoneNumberId"] = phone_number_id
+        await store.write(data)
     return {"active": phone_number_id}
 
 
 @app.delete("/api/phone-numbers/{phone_number_id}")
 async def delete_phone_number(phone_number_id: str) -> dict[str, Any]:
-    data = await store.read()
-    before = len(data["phoneNumbers"])
-    data["phoneNumbers"] = [p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) != phone_number_id]
-    if data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id:
-        data["settings"]["meta"].pop("phoneNumberId", None)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        before = len(data["phoneNumbers"])
+        data["phoneNumbers"] = [p for p in data["phoneNumbers"] if (p.get("phoneNumberId") or p.get("id")) != phone_number_id]
+        if data.get("settings", {}).get("meta", {}).get("phoneNumberId") == phone_number_id:
+            data["settings"]["meta"].pop("phoneNumberId", None)
+        await store.write(data)
     return {"deleted": before - len(data["phoneNumbers"])}
 
 
@@ -1597,10 +1681,11 @@ async def get_template(template_id: str) -> dict[str, Any]:
 
 @app.post("/api/templates")
 async def create_template(body: TemplateIn) -> dict[str, Any]:
-    data = await store.read()
-    doc = {"id": new_id("tpl"), **body.model_dump(), "createdAt": now_iso()}
-    data["templates"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        doc = {"id": new_id("tpl"), **body.model_dump(), "createdAt": now_iso()}
+        data["templates"].append(doc)
+        await store.write(data)
     return doc
 
 
@@ -1616,7 +1701,6 @@ async def upload_media(file: UploadFile = File(...)) -> dict[str, Any]:
     media_dir.mkdir(parents=True, exist_ok=True)
     path = media_dir / f"{media_id}{ext}"
     path.write_bytes(raw)
-    data = await store.read()
     doc = {
         "id": media_id,
         "filename": file.filename,
@@ -1626,8 +1710,10 @@ async def upload_media(file: UploadFile = File(...)) -> dict[str, Any]:
         "url": f"{public_base_url()}/api/media/{media_id}/raw" if public_base_url() else f"/api/media/{media_id}/raw",
         "createdAt": now_iso(),
     }
-    data["media"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        data["media"].append(doc)
+        await store.write(data)
     return doc
 
 
@@ -1658,42 +1744,45 @@ async def get_contact(contact_id: str) -> dict[str, Any]:
 
 @app.patch("/api/contacts/{contact_id}")
 async def update_contact(contact_id: str, body: ContactUpdateIn) -> dict[str, Any]:
-    data = await store.read()
-    contact = next((c for c in data["contacts"] if c["id"] == contact_id), None)
-    if not contact:
-        raise HTTPException(404, "Contato não encontrado")
-    contact["name"] = body.name
-    contact["tags"] = sorted(set(body.tags or []))
-    contact["lists"] = sorted(set(body.lists or []))
-    contact["customFields"] = body.customFields or {}
-    mark_contact_scope(contact, body.phoneNumberId)
-    contact["updatedAt"] = now_iso()
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        contact = next((c for c in data["contacts"] if c["id"] == contact_id), None)
+        if not contact:
+            raise HTTPException(404, "Contato não encontrado")
+        contact["name"] = body.name
+        contact["tags"] = sorted(set(body.tags or []))
+        contact["lists"] = sorted(set(body.lists or []))
+        contact["customFields"] = body.customFields or {}
+        mark_contact_scope(contact, body.phoneNumberId)
+        contact["updatedAt"] = now_iso()
+        await store.write(data)
     return contact
 
 
 @app.post("/api/contacts")
 async def create_contact(body: LeadIn) -> dict[str, Any]:
-    data = await store.read()
-    contact = upsert_contact(data, body.phone, body.name, body.phoneNumberId)
-    tag_ids = [ensure_named_tag(data, value, body.phoneNumberId) for value in body.tags]
-    list_ids = [ensure_named_list(data, value, body.phoneNumberId) for value in body.lists]
-    attach_labels(contact, [x for x in tag_ids if x], [x for x in list_ids if x], body.customFields)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        contact = upsert_contact(data, body.phone, body.name, body.phoneNumberId)
+        tag_ids = [ensure_named_tag(data, value, body.phoneNumberId) for value in body.tags]
+        list_ids = [ensure_named_list(data, value, body.phoneNumberId) for value in body.lists]
+        attach_labels(contact, [x for x in tag_ids if x], [x for x in list_ids if x], body.customFields)
+        await store.write(data)
     return contact
 
 
 @app.post("/api/contacts/import")
 async def import_contacts(rows: list[LeadIn]) -> dict[str, Any]:
-    data = await store.read()
-    count = 0
-    for row in rows:
-        contact = upsert_contact(data, row.phone, row.name, row.phoneNumberId)
-        tag_ids = [ensure_named_tag(data, value, row.phoneNumberId) for value in row.tags]
-        list_ids = [ensure_named_list(data, value, row.phoneNumberId) for value in row.lists]
-        attach_labels(contact, [x for x in tag_ids if x], [x for x in list_ids if x], row.customFields)
-        count += 1
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        count = 0
+        for row in rows:
+            contact = upsert_contact(data, row.phone, row.name, row.phoneNumberId)
+            tag_ids = [ensure_named_tag(data, value, row.phoneNumberId) for value in row.tags]
+            list_ids = [ensure_named_list(data, value, row.phoneNumberId) for value in row.lists]
+            attach_labels(contact, [x for x in tag_ids if x], [x for x in list_ids if x], row.customFields)
+            count += 1
+        await store.write(data)
     return {"count": count}
 
 
@@ -1709,27 +1798,28 @@ async def import_contacts_csv(
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames:
         raise HTTPException(400, "CSV sem cabeçalho")
-    data = await store.read()
-    list_id = ensure_named_list(data, listName or Path(file.filename or "lista").stem, phoneNumberId)
-    tag_ids = [ensure_named_tag(data, tag.strip(), phoneNumberId) for tag in tags.split(",") if tag.strip()]
-    imported = 0
-    custom_fields = set()
-    for row in reader:
-        phone = row.get("phone") or row.get("telefone") or row.get("whatsapp") or row.get("celular")
-        if not phone:
-            continue
-        name = row.get("name") or row.get("nome")
-        ignored = {"phone", "telefone", "whatsapp", "celular", "name", "nome", "tags", "listas", "lists"}
-        custom = {k: v for k, v in row.items() if k and k.lower() not in ignored and v not in (None, "")}
-        custom_fields.update(custom.keys())
-        row_tags = [x.strip() for x in str(row.get("tags") or "").split(",") if x.strip()]
-        row_lists = [x.strip() for x in str(row.get("lists") or row.get("listas") or "").split(",") if x.strip()]
-        list_ids = [list_id] + [ensure_named_list(data, x, phoneNumberId) for x in row_lists]
-        all_tag_ids = tag_ids + [ensure_named_tag(data, x, phoneNumberId) for x in row_tags]
-        contact = upsert_contact(data, phone, name, phoneNumberId)
-        attach_labels(contact, all_tag_ids, [x for x in list_ids if x], custom)
-        imported += 1
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        list_id = ensure_named_list(data, listName or Path(file.filename or "lista").stem, phoneNumberId)
+        tag_ids = [ensure_named_tag(data, tag.strip(), phoneNumberId) for tag in tags.split(",") if tag.strip()]
+        imported = 0
+        custom_fields = set()
+        for row in reader:
+            phone = row.get("phone") or row.get("telefone") or row.get("whatsapp") or row.get("celular")
+            if not phone:
+                continue
+            name = row.get("name") or row.get("nome")
+            ignored = {"phone", "telefone", "whatsapp", "celular", "name", "nome", "tags", "listas", "lists"}
+            custom = {k: v for k, v in row.items() if k and k.lower() not in ignored and v not in (None, "")}
+            custom_fields.update(custom.keys())
+            row_tags = [x.strip() for x in str(row.get("tags") or "").split(",") if x.strip()]
+            row_lists = [x.strip() for x in str(row.get("lists") or row.get("listas") or "").split(",") if x.strip()]
+            list_ids = [list_id] + [ensure_named_list(data, x, phoneNumberId) for x in row_lists]
+            all_tag_ids = tag_ids + [ensure_named_tag(data, x, phoneNumberId) for x in row_tags]
+            contact = upsert_contact(data, phone, name, phoneNumberId)
+            attach_labels(contact, all_tag_ids, [x for x in list_ids if x], custom)
+            imported += 1
+        await store.write(data)
     return {"count": imported, "listId": list_id, "customFields": sorted(custom_fields)}
 
 
@@ -1740,10 +1830,11 @@ async def list_lists(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]
 
 @app.post("/api/lists")
 async def create_list(body: NamedIn) -> dict[str, Any]:
-    data = await store.read()
-    doc = {"id": new_id("list"), "name": body.name, "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
-    data["lists"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        doc = {"id": new_id("list"), "name": body.name, "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
+        data["lists"].append(doc)
+        await store.write(data)
     return doc
 
 
@@ -1754,17 +1845,18 @@ async def list_custom_fields(phoneNumberId: Optional[str] = None) -> list[dict[s
 
 @app.post("/api/custom-fields")
 async def create_custom_field(body: CustomFieldIn) -> dict[str, Any]:
-    data = await store.read()
     key = re.sub(r"[^a-zA-Z0-9_]+", "_", body.key.strip()).strip("_")
     if not key:
         raise HTTPException(400, "Informe uma chave válida")
-    doc = {"id": f"{body.phoneNumberId or 'global'}_{key}", "key": key, "label": body.label or key, "type": body.type, "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
-    existing = next((f for f in data["customFields"] if f["key"] == key and (f.get("phoneNumberId") or "") == (body.phoneNumberId or "")), None)
-    if existing:
-        existing.update(doc)
-    else:
-        data["customFields"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        doc = {"id": f"{body.phoneNumberId or 'global'}_{key}", "key": key, "label": body.label or key, "type": body.type, "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
+        existing = next((f for f in data["customFields"] if f["key"] == key and (f.get("phoneNumberId") or "") == (body.phoneNumberId or "")), None)
+        if existing:
+            existing.update(doc)
+        else:
+            data["customFields"].append(doc)
+        await store.write(data)
     return doc
 
 
@@ -1775,10 +1867,11 @@ async def list_tags(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]
 
 @app.post("/api/tags")
 async def create_tag(body: NamedIn) -> dict[str, Any]:
-    data = await store.read()
-    doc = {"id": new_id("tag"), "name": body.name, "color": body.color or "#84ff00", "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
-    data["tags"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        doc = {"id": new_id("tag"), "name": body.name, "color": body.color or "#84ff00", "phoneNumberId": body.phoneNumberId, "createdAt": now_iso()}
+        data["tags"].append(doc)
+        await store.write(data)
     return doc
 
 
@@ -1798,12 +1891,13 @@ async def inbox(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]]:
 
 @app.get("/api/inbox/{conversation_id}")
 async def conversation(conversation_id: str) -> dict[str, Any]:
-    data = await store.read()
-    convo = next((c for c in data["conversations"] if c["id"] == conversation_id), None)
-    if not convo:
-        raise HTTPException(404, "Conversa não encontrada")
-    convo["unread"] = 0
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        convo = next((c for c in data["conversations"] if c["id"] == conversation_id), None)
+        if not convo:
+            raise HTTPException(404, "Conversa não encontrada")
+        convo["unread"] = 0
+        await store.write(data)
     return {
         "conversation": convo,
         "contact": next((c for c in data["contacts"] if c["phone"] == convo["phone"]), None),
@@ -1845,31 +1939,34 @@ async def list_flows(phoneNumberId: Optional[str] = None) -> list[dict[str, Any]
 
 @app.post("/api/flows")
 async def create_flow(body: FlowIn) -> dict[str, Any]:
-    data = await store.read()
-    doc = {"id": new_id("flow"), **body.model_dump(), "createdAt": now_iso(), "updatedAt": now_iso()}
-    data["flows"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        doc = {"id": new_id("flow"), **body.model_dump(), "createdAt": now_iso(), "updatedAt": now_iso()}
+        data["flows"].append(doc)
+        await store.write(data)
     return doc
 
 
 @app.patch("/api/flows/{flow_id}")
 async def update_flow(flow_id: str, body: FlowIn) -> dict[str, Any]:
-    data = await store.read()
-    flow = next((f for f in data["flows"] if f["id"] == flow_id), None)
-    if not flow:
-        raise HTTPException(404, "Fluxo não encontrado")
-    flow.update(body.model_dump())
-    flow["updatedAt"] = now_iso()
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        flow = next((f for f in data["flows"] if f["id"] == flow_id), None)
+        if not flow:
+            raise HTTPException(404, "Fluxo não encontrado")
+        flow.update(body.model_dump())
+        flow["updatedAt"] = now_iso()
+        await store.write(data)
     return flow
 
 
 @app.delete("/api/flows/{flow_id}")
 async def delete_flow(flow_id: str) -> dict[str, Any]:
-    data = await store.read()
-    before = len(data["flows"])
-    data["flows"] = [f for f in data["flows"] if f["id"] != flow_id]
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        before = len(data["flows"])
+        data["flows"] = [f for f in data["flows"] if f["id"] != flow_id]
+        await store.write(data)
     return {"deleted": before - len(data["flows"])}
 
 
@@ -1880,31 +1977,34 @@ async def list_automations(phoneNumberId: Optional[str] = None) -> list[dict[str
 
 @app.post("/api/automations")
 async def create_automation(body: AutomationIn) -> dict[str, Any]:
-    data = await store.read()
-    doc = {"id": new_id("auto"), **body.model_dump(), "createdAt": now_iso(), "updatedAt": now_iso()}
-    data["automations"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        doc = {"id": new_id("auto"), **body.model_dump(), "createdAt": now_iso(), "updatedAt": now_iso()}
+        data["automations"].append(doc)
+        await store.write(data)
     return doc
 
 
 @app.patch("/api/automations/{automation_id}")
 async def update_automation(automation_id: str, body: AutomationIn) -> dict[str, Any]:
-    data = await store.read()
-    automation = next((a for a in data["automations"] if a["id"] == automation_id), None)
-    if not automation:
-        raise HTTPException(404, "Automação não encontrada")
-    automation.update(body.model_dump())
-    automation["updatedAt"] = now_iso()
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        automation = next((a for a in data["automations"] if a["id"] == automation_id), None)
+        if not automation:
+            raise HTTPException(404, "Automação não encontrada")
+        automation.update(body.model_dump())
+        automation["updatedAt"] = now_iso()
+        await store.write(data)
     return automation
 
 
 @app.delete("/api/automations/{automation_id}")
 async def delete_automation(automation_id: str) -> dict[str, Any]:
-    data = await store.read()
-    before = len(data["automations"])
-    data["automations"] = [a for a in data["automations"] if a["id"] != automation_id]
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        before = len(data["automations"])
+        data["automations"] = [a for a in data["automations"] if a["id"] != automation_id]
+        await store.write(data)
     return {"deleted": before - len(data["automations"])}
 
 
@@ -1929,31 +2029,32 @@ async def estimate_campaign(body: TemplateCampaignIn) -> dict[str, Any]:
 
 @app.post("/api/campaigns")
 async def create_campaign(body: TemplateCampaignIn, background: BackgroundTasks) -> dict[str, Any]:
-    data = await store.read()
-    contacts = contacts_for_campaign(data, body)
-    status = "running" if body.sendNow else "scheduled" if body.scheduledAt else "draft"
-    doc = {
-        "id": new_id("camp"),
-        "name": body.name,
-        "templateName": body.templateName,
-        "language": body.language,
-        "phoneNumberId": body.phoneNumberId,
-        "responseFlowId": body.responseFlowId,
-        "scheduledAt": body.scheduledAt,
-        "targetCount": len(contacts),
-        "sent": 0,
-        "failed": 0,
-        "delivered": 0,
-        "read": 0,
-        "buttonClicks": 0,
-        "results": [],
-        "lastError": None,
-        "config": body.model_dump(),
-        "status": status,
-        "createdAt": now_iso(),
-    }
-    data["campaigns"].append(doc)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        contacts = contacts_for_campaign(data, body)
+        status = "running" if body.sendNow else "scheduled" if body.scheduledAt else "draft"
+        doc = {
+            "id": new_id("camp"),
+            "name": body.name,
+            "templateName": body.templateName,
+            "language": body.language,
+            "phoneNumberId": body.phoneNumberId,
+            "responseFlowId": body.responseFlowId,
+            "scheduledAt": body.scheduledAt,
+            "targetCount": len(contacts),
+            "sent": 0,
+            "failed": 0,
+            "delivered": 0,
+            "read": 0,
+            "buttonClicks": 0,
+            "results": [],
+            "lastError": None,
+            "config": body.model_dump(),
+            "status": status,
+            "createdAt": now_iso(),
+        }
+        data["campaigns"].append(doc)
+        await store.write(data)
     if body.sendNow:
         background.add_task(execute_campaign, doc["id"])
     return doc
@@ -1961,88 +2062,88 @@ async def create_campaign(body: TemplateCampaignIn, background: BackgroundTasks)
 
 @app.post("/api/campaigns/{campaign_id}/resume")
 async def resume_campaign(campaign_id: str, background: BackgroundTasks) -> dict[str, Any]:
-    data = await store.read()
-    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.get("status") == "canceled":
-        raise HTTPException(status_code=400, detail="Campanha cancelada")
-    campaign["status"] = "running"
-    campaign["lastResumeAt"] = now_iso()
-    campaign["lastErrorText"] = None
-    await store.write(data)
+    # mark_campaign_resuming() (added by PR A / #2) already wraps its
+    # read-modify-write cycle in STORE_MUTATION_LOCK internally, which is
+    # exactly the fix PR B made here -- so calling it preserves both the
+    # shared auto-resume/manual-resume code path from PR A and the
+    # concurrency fix from PR B without duplicating either.
+    campaign = await mark_campaign_resuming(campaign_id)
     background.add_task(execute_campaign, campaign_id, True)
     return campaign
 
 
 @app.patch("/api/campaigns/{campaign_id}")
 async def update_campaign(campaign_id: str, body: CampaignUpdateIn, background: BackgroundTasks) -> dict[str, Any]:
-    data = await store.read()
-    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.get("status") in {"done", "running"} and not body.sendNow:
-        raise HTTPException(status_code=400, detail="Somente campanhas agendadas, rascunhos ou falhas podem ser editadas")
-    config = campaign.setdefault("config", {})
-    if body.name is not None:
-        campaign["name"] = body.name
-        config["name"] = body.name
-    if body.scheduledAt is not None:
-        campaign["scheduledAt"] = body.scheduledAt or None
-        config["scheduledAt"] = body.scheduledAt or None
-        config["sendNow"] = False
-        campaign["status"] = "scheduled" if body.scheduledAt else "draft"
-    if body.batchSize is not None:
-        config["batchSize"] = body.batchSize
-    if body.batchPauseSeconds is not None:
-        config["batchPauseSeconds"] = body.batchPauseSeconds
-    campaign["updatedAt"] = now_iso()
-    if body.sendNow:
-        campaign["scheduledAt"] = None
-        config["scheduledAt"] = None
-        config["sendNow"] = True
-        campaign["status"] = "running"
-        campaign["lastResumeAt"] = now_iso()
-        campaign["lastErrorText"] = None
+    resume_needed = False
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        if campaign.get("status") in {"done", "running"} and not body.sendNow:
+            raise HTTPException(status_code=400, detail="Somente campanhas agendadas, rascunhos ou falhas podem ser editadas")
+        config = campaign.setdefault("config", {})
+        if body.name is not None:
+            campaign["name"] = body.name
+            config["name"] = body.name
+        if body.scheduledAt is not None:
+            campaign["scheduledAt"] = body.scheduledAt or None
+            config["scheduledAt"] = body.scheduledAt or None
+            config["sendNow"] = False
+            campaign["status"] = "scheduled" if body.scheduledAt else "draft"
+        if body.batchSize is not None:
+            config["batchSize"] = body.batchSize
+        if body.batchPauseSeconds is not None:
+            config["batchPauseSeconds"] = body.batchPauseSeconds
+        campaign["updatedAt"] = now_iso()
+        if body.sendNow:
+            campaign["scheduledAt"] = None
+            config["scheduledAt"] = None
+            config["sendNow"] = True
+            campaign["status"] = "running"
+            campaign["lastResumeAt"] = now_iso()
+            campaign["lastErrorText"] = None
+            resume_needed = True
         await store.write(data)
+    if resume_needed:
         background.add_task(execute_campaign, campaign_id, True)
-        return campaign
-    await store.write(data)
     return campaign
 
 
 @app.post("/api/campaigns/{campaign_id}/cancel")
 async def cancel_campaign(campaign_id: str) -> dict[str, Any]:
-    data = await store.read()
-    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    campaign["status"] = "canceled"
-    campaign["canceledAt"] = now_iso()
-    campaign["lastErrorText"] = None
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        campaign["status"] = "canceled"
+        campaign["canceledAt"] = now_iso()
+        campaign["lastErrorText"] = None
+        await store.write(data)
     return campaign
 
 
 @app.post("/api/campaigns/{campaign_id}/retry-failed")
 async def retry_failed_campaign(campaign_id: str, background: BackgroundTasks) -> dict[str, Any]:
-    data = await store.read()
-    campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    failed_rows = [row for row in campaign.get("results") or [] if row.get("status") == "failed"]
-    if not failed_rows:
-        raise HTTPException(status_code=400, detail="Nenhum lead com falha para reenviar")
-    failed_keys = {(row.get("contactId"), normalize_phone(str(row.get("phone") or ""))) for row in failed_rows}
-    campaign["results"] = [
-        row
-        for row in campaign.get("results") or []
-        if (row.get("contactId"), normalize_phone(str(row.get("phone") or ""))) not in failed_keys
-    ]
-    campaign["status"] = "running"
-    campaign["lastRetryFailedAt"] = now_iso()
-    campaign["lastErrorText"] = None
-    summarize_campaign(campaign)
-    await store.write(data)
+    async with STORE_MUTATION_LOCK:
+        data = await store.read()
+        campaign = next((c for c in data["campaigns"] if c["id"] == campaign_id), None)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        failed_rows = [row for row in campaign.get("results") or [] if row.get("status") == "failed"]
+        if not failed_rows:
+            raise HTTPException(status_code=400, detail="Nenhum lead com falha para reenviar")
+        failed_keys = {(row.get("contactId"), normalize_phone(str(row.get("phone") or ""))) for row in failed_rows}
+        campaign["results"] = [
+            row
+            for row in campaign.get("results") or []
+            if (row.get("contactId"), normalize_phone(str(row.get("phone") or ""))) not in failed_keys
+        ]
+        campaign["status"] = "running"
+        campaign["lastRetryFailedAt"] = now_iso()
+        campaign["lastErrorText"] = None
+        summarize_campaign(campaign)
+        await store.write(data)
     background.add_task(execute_campaign, campaign_id, True)
     return campaign
