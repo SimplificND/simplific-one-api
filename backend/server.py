@@ -297,7 +297,72 @@ def _active_phone_number_id_tx(conn, phone_numbers: Optional[list[dict[str, Any]
     if active:
         return active.get("phoneNumberId") or active.get("id") or ""
     first = next(iter(phone_numbers), None)
-    return (first or {}).get("phoneNumberId") or (first or {}).get("id") or ""
+    if first:
+        return first.get("phoneNumberId") or first.get("id") or ""
+    recovered = next(iter(_inferred_phone_numbers_tx(conn)), None)
+    return (recovered or {}).get("phoneNumberId") or (recovered or {}).get("id") or ""
+
+
+def _inferred_phone_numbers_tx(conn) -> list[dict[str, Any]]:
+    known: dict[str, dict[str, Any]] = {}
+
+    def remember(phone_number_id: Optional[str], display_phone: Optional[str] = None, source: str = "inferred") -> None:
+        if not phone_number_id:
+            return
+        row = known.setdefault(phone_number_id, {
+            "id": phone_number_id,
+            "phoneNumberId": phone_number_id,
+            "displayPhoneNumber": display_phone or "",
+            "verifiedName": display_phone or phone_number_id,
+            "qualityRating": "UNKNOWN",
+            "messagingLimitTier": "UNKNOWN",
+            "active": False,
+            "source": source,
+            "recovered": True,
+        })
+        if display_phone and not row.get("displayPhoneNumber"):
+            row["displayPhoneNumber"] = display_phone
+        if display_phone and row.get("verifiedName") == phone_number_id:
+            row["verifiedName"] = display_phone
+
+    conversation_rows = conn.execute(
+        """SELECT phone_number_id, display_phone_number
+           FROM conversations
+           WHERE phone_number_id IS NOT NULL AND phone_number_id != ''
+           ORDER BY last_message_at DESC"""
+    ).fetchall()
+    for row in conversation_rows:
+        remember(row["phone_number_id"], row["display_phone_number"], "conversation")
+
+    message_rows = conn.execute(
+        """SELECT phone_number_id, display_phone_number
+           FROM messages
+           WHERE phone_number_id IS NOT NULL AND phone_number_id != ''
+           ORDER BY created_at DESC
+           LIMIT 200"""
+    ).fetchall()
+    for row in message_rows:
+        remember(row["phone_number_id"], row["display_phone_number"], "message")
+
+    webhook_rows = conn.execute(
+        "SELECT payload_json FROM webhook_events ORDER BY rowid DESC LIMIT 100"
+    ).fetchall()
+    for row in webhook_rows:
+        payload = db_module._loads(row["payload_json"], {})
+        for entry in payload.get("entry", []) or []:
+            for change in entry.get("changes", []) or []:
+                metadata = ((change.get("value") or {}).get("metadata") or {})
+                remember(metadata.get("phone_number_id"), metadata.get("display_phone_number"), "webhook")
+
+    settings = db_module.db_get_settings_key(conn, "meta")
+    active_id = (
+        settings.get("phoneNumberId")
+        or os.getenv("META_PHONE_NUMBER_ID")
+        or next(iter(known), "")
+    )
+    for row in known.values():
+        row["active"] = (row.get("phoneNumberId") or row.get("id")) == active_id
+    return list(known.values())
 
 
 async def active_phone_number_id(data: Optional[dict[str, Any]] = None, override: Optional[str] = None) -> str:
@@ -1146,12 +1211,13 @@ def update_campaign_click_from_inbound(conn, inbound: dict[str, Any]) -> None:
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     cfg = await meta_config()
+    active_phone = cfg["phoneNumberId"] or await active_phone_number_id()
     return {
         "ok": True,
         "app": APP_NAME,
         "time": now_iso(),
         "metaConfigured": await configured_meta(),
-        "phoneNumberId": bool(cfg["phoneNumberId"]),
+        "phoneNumberId": bool(active_phone),
         "wabaId": bool(cfg["wabaId"]),
         "webhookToken": META_VERIFY_TOKEN != "change-me",
     }
@@ -1392,6 +1458,8 @@ async def list_phone_numbers() -> list[dict[str, Any]]:
             "active": True,
             "source": "settings",
         })
+    if not numbers:
+        numbers = await db_run(_inferred_phone_numbers_tx)
     return numbers
 
 
